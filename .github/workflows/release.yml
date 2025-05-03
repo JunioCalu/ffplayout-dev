@@ -7,7 +7,7 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, macOS-latest, windows-latest]
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -18,28 +18,6 @@ jobs:
       - name: Set up Rust
         run: |
           rustup update stable
-
-      - name: Build on Windows
-        if: ${{ matrix.os == 'windows-latest' }}
-        run: |
-          cargo build --release
-          cp ./target/release/ffplayout.exe .
-          tar -a -c --exclude=*.service -f "ffplayout-${{ github.ref_name }}_x86_64-pc-windows-msvc.zip" assets docker docs LICENSE README.md CHANGELOG.md ffplayout.exe
-          del ffplayout.exe
-
-      - name: Build on macOS
-        if: ${{ matrix.os == 'macOS-latest' }}
-        run: |
-          rustup target add x86_64-apple-darwin
-          rustup target add aarch64-apple-darwin
-          cargo build --release --target=x86_64-apple-darwin
-          cargo build --release --target=aarch64-apple-darwin
-          cp ./target/x86_64-apple-darwin/release/ffplayout .
-          zip -r "ffplayout-${{ github.ref_name }}_x86_64-apple-darwin.zip" assets docker docs LICENSE README.md CHANGELOG.md ffplayout -x *.db -x *.db-shm -x *.db-wal -x *.service
-          rm -f ffplayout
-          cp ./target/aarch64-apple-darwin/release/ffplayout .
-          zip -r "ffplayout-${{ github.ref_name }}_aarch64-apple-darwin.zip" assets docker docs LICENSE README.md CHANGELOG.md ffplayout -x *.db -x *.db-shm -x *.db-wal -x *.service
-          rm -f ffplayout
 
       - name: Build on Linux
         if: ${{ matrix.os == 'ubuntu-latest' }}
