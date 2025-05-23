@@ -1,3 +1,241 @@
+// INÍCIO METADADOS CLAUDE
+// Esse é o arquivo '/engine/src/player/utils/mod.rs que eu estou numerando como arquivo número 9'
+// Informações adicionais:
+// - Tamanho sem o cabeçalho Claude: 38519 bytes
+// - Número de linhas sem o cabeçalho Claude: 1268
+// - Status Git: Modified (modificado mas não adicionado ao staging)
+// - Branch atual: skip_clip_on_cuda_decoder_error
+// - Última modificação: Wed Feb 19 20:18:30 2025 -0300
+// - Possível propósito: Configuração, Acesso a dados, Iterador, Processamento de mídia
+//
+// Documentação da struct:
+// Compare incoming stream name with expecting name, but ignore question mark.
+// pub fn valid_stream(msg: &str) -> bool {
+// if let Some((unexpected, expected)) = msg.split_once(',') {
+// let re = Regex::new(r".*Unexpected stream|App field don't match up|expecting|[\s]+|\?$")
+// .unwrap();
+// let unexpected = re.replace_all(unexpected, "");
+// let expected = re.replace_all(expected, "");
+// if unexpected == expected {
+// return true;
+// }
+// }
+// false
+// }
+// Prepare output parameters
+// 
+// Seek for multiple outputs and add mapping for it.
+// pub fn prepare_output_cmd(
+// config: &PlayoutConfig,
+// mut cmd: Vec<String>,
+// filters: &Option<Filters>,
+// ) -> Vec<String> {
+// let mut output_params = config.output.clone().output_cmd.unwrap();
+// let mut new_params = vec![];
+// let mut count = 0;
+// let re_v = Regex::new(r"\[?0:v(:0)?\]?").unwrap();
+// if let Some(mut filter) = filters.clone() {
+// for (i, param) in output_params.iter().enumerate() {
+// if filter.video_out_link.len() > count && re_v.is_match(param) {
+// // replace mapping with link from filter struct
+// new_params.push(filter.video_out_link[count].clone());
+// } else {
+// new_params.push(param.clone());
+// }
+// // Check if parameter is a output
+// if i > 0
+// && !param.starts_with('-')
+// && !output_params[i - 1].starts_with('-')
+// && i < output_params.len() - 1
+// {
+// count += 1;
+// if filter.video_out_link.len() > count
+// && !output_params.contains(&"-map".to_string())
+// {
+// new_params.append(&mut vec_strings!["-map", filter.video_out_link[count]]);
+// for i in 0..config.processing.audio_tracks {
+// new_params.append(&mut vec_strings!["-map", format!("0:a:{i}")]);
+// }
+// }
+// }
+// }
+// output_params = new_params;
+// cmd.append(&mut filter.cmd());
+// // add mapping at the begin, if needed
+// if !filter.map().iter().all(|item| output_params.contains(item))
+// && filter.output_chain.is_empty()
+// && filter.video_out_link.is_empty()
+// {
+// cmd.append(&mut filter.map());
+// } else if &output_params[0] != "-map" && !filter.video_out_link.is_empty() {
+// cmd.append(&mut vec_strings!["-map", filter.video_out_link[0].clone()]);
+// for i in 0..config.processing.audio_tracks {
+// cmd.append(&mut vec_strings!["-map", format!("0:a:{i}")]);
+// }
+// }
+// }
+// if config.processing.vtt_enable {
+// let i = cmd.iter().filter(|&n| n == "-i").count().saturating_sub(1);
+// cmd.append(&mut vec_strings!("-map", format!("{i}:s?")));
+// }
+// cmd.append(&mut output_params);
+// cmd
+// }
+// map media struct to json object
+// pub fn get_media_map(media: Media) -> Value {
+// let mut obj = json!({
+// "in": media.seek,
+// "out": media.out,
+// "duration": media.duration,
+// "category": media.category,
+// "source": media.source,
+// });
+// if let Some(title) = media.title {
+// obj.as_object_mut()
+// .unwrap()
+// .insert("title".to_string(), Value::String(title));
+// }
+// obj
+// }
+// prepare json object for response
+// pub async fn get_data_map(manager: &ChannelManager) -> Map<String, Value> {
+// let media = manager
+// .current_media
+// .lock()
+// .await
+// .clone()
+// .unwrap_or_else(Media::default);
+// let channel = manager.channel.lock().await.clone();
+// let config = manager.config.lock().await.processing.clone();
+// let ingest_is_alive = manager.ingest_is_alive.load(Ordering::SeqCst);
+// let mut data_map = Map::new();
+// let current_time = time_in_seconds(&channel.timezone);
+// let shift = channel.time_shift;
+// let begin = media.begin.unwrap_or(0.0) - shift;
+// let played_time = current_time - begin;
+// data_map.insert("index".to_string(), json!(media.index));
+// data_map.insert("ingest".to_string(), json!(ingest_is_alive));
+// data_map.insert("mode".to_string(), json!(config.mode));
+// data_map.insert(
+// "shift".to_string(),
+// json!((shift * 1000.0).round() / 1000.0),
+// );
+// data_map.insert(
+// "elapsed".to_string(),
+// json!((played_time * 1000.0).round() / 1000.0),
+// );
+// data_map.insert("media".to_string(), get_media_map(media));
+// data_map
+// }
+// Video clip struct to hold some important states and comments for current media.
+// #[derive(Debug, Serialize, Deserialize, Clone)]
+//
+// RESUMO ESTRUTURAL:
+// --------------------------------------------------
+// Estruturas (structs):
+// - pub struct Media {
+//
+// Enumerações (enums):
+// - Nenhuma enum definido neste arquivo
+//
+// Traits:
+// - Nenhuma trait definida neste arquivo
+//
+// Funções por categoria:
+// Funções de inicialização:
+// - pub async fn new(index: usize, src: &str, do_probe: bool) -> Self {
+//
+// Outras funções:
+// - pub fn valid_stream(msg: &str) -> bool {
+// - pub fn prepare_output_cmd(
+// - pub fn get_media_map(media: Media) -> Value {
+// - pub async fn get_data_map(manager: &ChannelManager) -> Map<String, Value> {
+// - pub async fn add_probe(&mut self, check_audio: bool) -> Result<(), String> {
+// - pub async fn add_filter(
+// - fn default() -> Self {
+// - fn eq(&self, other: &Self) -> bool {
+// - fn null_string<'de, D>(d: D) -> Result<String, D::Error>
+// - fn is_empty_string(st: &String) -> bool {
+// - pub fn fps_calc(r_frame_rate: &str, default: f64) -> f64 {
+// - pub async fn json_reader(path: &PathBuf) -> Result<JsonPlaylist, Error> {
+// - pub async fn json_writer(path: &PathBuf, data: JsonPlaylist) -> Result<(), Error> {
+// - pub fn time_in_seconds(timezone: &Option<Tz>) -> f64 {
+// - pub fn get_date(seek: bool, start: f64, get_next: bool, timezone: &Option<Tz>) -> String {
+// - pub fn time_from_header(headers: &header::HeaderMap) -> Option<DateTime<Local>> {
+// - pub async fn modified_time(path: &str) -> Option<String> {
+// - pub fn time_to_sec(time_str: &str, timezone: &Option<Tz>) -> f64 {
+// - pub fn sec_to_time(sec: f64) -> String {
+// - pub fn file_extension(filename: &Path) -> Option<&str> {
+// - pub fn is_close(a: f64, b: f64, to: f64) -> bool {
+// - pub fn sum_durations(clip_list: &[Media]) -> f64 {
+// - pub fn get_delta(config: &PlayoutConfig, recovery_state: &ChannelRecoveryState, begin: &f64) -> (f64, f64) {
+// - pub fn loop_image(config: &PlayoutConfig, node: &Media) -> Vec<String> {
+// - pub fn loop_filler(config: &PlayoutConfig, node: &Media) -> Vec<String> {
+// - pub fn seek_and_length(config: &PlayoutConfig, node: &mut Media) -> Vec<String> {
+// - pub fn gen_dummy(config: &PlayoutConfig, duration: f64) -> (String, Vec<String>) {
+// - pub fn is_remote(path: &str) -> bool {
+// - pub fn include_file_extension(config: &PlayoutConfig, file_path: &Path) -> bool {
+// - pub async fn stderr_reader(
+// - async fn is_in_system(name: &str) -> Result<(), String> {
+// - async fn ffmpeg_filter_and_libs(config: &mut PlayoutConfig) -> Result<(), String> {
+// - pub async fn validate_ffmpeg(config: &mut PlayoutConfig) -> Result<(), String> {
+// - pub fn gen_tcp_socket(exclude_socket: String) -> Option<String> {
+// - pub fn is_free_tcp_port(url: &str) -> bool {
+// - pub fn get_date_range(id: i32, date_range: &[String]) -> Vec<String> {
+// - pub fn parse_log_level_filter(s: &str) -> Result<LevelFilter, &'static str> {
+// - pub fn custom_format<T: fmt::Display>(template: &str, args: &[T]) -> String {
+// - fn gcd(a: u32, b: u32) -> u32 {
+// - pub fn fraction(d: f64, max_denominator: u32) -> (u32, u32) {
+// - pub fn calc_aspect(config: &PlayoutConfig, aspect_string: &Option<String>) -> f64 {
+//
+// Dependências (imports completos):
+// - use std::{
+//   ffi::OsStr,
+//   fmt,
+//   io::Error,
+//   net::TcpListener,
+//   path::{Path, PathBuf},
+//   process::{exit, Stdio},
+//   str::FromStr,
+//   sync::{atomic::Ordering, Arc},
+//   };
+// - use chrono::{prelude::*, TimeDelta};
+// - use chrono_tz::Tz;
+// - use log::*;
+// - use probe::MediaProbe;
+// - use rand::prelude::*;
+// - use regex::Regex;
+// - use reqwest::header;
+// - use serde::{de::Deserializer, Deserialize, Serialize};
+// - use serde_json::{json, Map, Value};
+// - use tokio::{
+//   fs::{metadata, File},
+//   io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+//   process::{ChildStderr, Command},
+//   sync::Mutex,
+//   };
+// - use crate::player::{
+//   controller::{
+//   ChannelManager,
+//   ProcessUnit::{self, *},
+//   },
+//   filter::{filter_chains, Filters},
+//   };
+// - use crate::utils::{
+//   config::{OutputMode::*, PlayoutConfig, FFMPEG_IGNORE_ERRORS, FFMPEG_UNRECOVERABLE_ERRORS, FFMPEG_DECODING_ERRORS},
+//   errors::ServiceError,
+//   logging::Target,
+//   time_machine::time_now,
+//   recovery::ChannelRecoveryState,
+//   };
+// - use crate::vec_strings;
+// --------------------------------------------------
+//
+// Este comentário foi adicionado automaticamente para facilitar 
+// o entendimento do contexto do projeto por sistemas de IA como o Claude.
+// FIM METADADOS CLAUDE
+//
+
 use std::{
     ffi::OsStr,
     fmt,
@@ -38,10 +276,11 @@ use crate::player::{
     filter::{filter_chains, Filters},
 };
 use crate::utils::{
-    config::{OutputMode::*, PlayoutConfig, FFMPEG_IGNORE_ERRORS, FFMPEG_UNRECOVERABLE_ERRORS},
+    config::{OutputMode::*, PlayoutConfig, FFMPEG_IGNORE_ERRORS, FFMPEG_UNRECOVERABLE_ERRORS, FFMPEG_DECODING_ERRORS},
     errors::ServiceError,
     logging::Target,
     time_machine::time_now,
+    recovery::ChannelRecoveryState,
 };
 pub use json_serializer::{read_json, JsonPlaylist};
 
@@ -538,7 +777,10 @@ pub fn sum_durations(clip_list: &[Media]) -> f64 {
 /// if we still in sync.
 ///
 /// We also get here the global delta between clip start and time when a new playlist should start.
-pub fn get_delta(config: &PlayoutConfig, begin: &f64) -> (f64, f64) {
+pub fn get_delta(config: &PlayoutConfig, recovery_state: &ChannelRecoveryState, begin: &f64) -> (f64, f64) {
+    // Check if in recovery mode
+    let in_recovery = recovery_state.is_in_recovery_mode();
+    
     let mut current_time = time_in_seconds(&config.channel.timezone);
     let start = config.playlist.start_sec.unwrap();
     let length = config.playlist.length_sec.unwrap_or(86400.0);
@@ -554,6 +796,7 @@ pub fn get_delta(config: &PlayoutConfig, begin: &f64) -> (f64, f64) {
         current_time += 86400.0;
     }
 
+    // Calculate normal delta
     let mut current_delta = begin - current_time;
 
     if is_close(
@@ -564,6 +807,25 @@ pub fn get_delta(config: &PlayoutConfig, begin: &f64) -> (f64, f64) {
         current_delta = current_delta.abs() - 86400.0;
     }
 
+    // During recovery mode, we want to maintain stable timing
+    if in_recovery {
+        // Optionally log that we're using stable timing during recovery
+        trace!(
+            "In recovery mode: stabilizing delta calculation (raw delta: {:.3})",
+            current_delta
+        );
+        current_delta = 0.0;
+        // // Handle the special case when current_delta is exactly zero
+        // if current_delta != 0.0 {
+        //     // Only adjust non-zero deltas
+        //     // Use a near-zero delta with the original sign preserved
+        //     current_delta = if current_delta > 0.0 { 0.001 } else { -0.001 };
+        // }
+        // // If current_delta is 0.0, keep it as is - perfect synchronization
+    }
+
+    // Calculate total_delta normally - this affects playlist progression
+    // which should continue even during recovery
     let total_delta = if current_time < start {
         start - current_time
     } else {
@@ -623,7 +885,12 @@ pub fn loop_image(config: &PlayoutConfig, node: &Media) -> Vec<String> {
 
 /// Loop filler until target duration is reached.
 pub fn loop_filler(config: &PlayoutConfig, node: &Media) -> Vec<String> {
-    let loop_count = (node.out / node.duration).ceil() as i32;
+    let loop_count = if node.duration > 0.0 {
+        (node.out / node.duration).ceil() as i32
+    } else {
+        1 // Fallback
+    };
+
     let mut source_cmd = vec![];
 
     if loop_count > 1 {
@@ -664,7 +931,12 @@ pub fn loop_filler(config: &PlayoutConfig, node: &Media) -> Vec<String> {
 
 /// Set clip seek in and length value.
 pub fn seek_and_length(config: &PlayoutConfig, node: &mut Media) -> Vec<String> {
-    let loop_count = (node.out / node.duration).ceil() as i32;
+    let loop_count = if node.duration > 0.0 {
+        (node.out / node.duration).ceil() as i32
+    } else {
+        1 // Fallback
+    };
+    
     let mut source_cmd = vec![];
     let mut cut_audio = false;
     let mut loop_audio = false;
@@ -882,6 +1154,21 @@ pub async fn stderr_reader(
                 "<bright black>[{suffix}]</> {}",
                 line.replace("[error] ", "").replace("[fatal] ", "")
             );
+
+            if FFMPEG_DECODING_ERRORS.iter().any(|e| line.contains(e)) {
+                // Adicionar em stderr_reader ao detectar erro de decodificação
+                // debug!(target: Target::file_mail(), channel = channel_id;
+                //     "[stderr_reader] Erro de decodificação encontrado: {} - substituindo por filler com duração exata", 
+                //     line.replace("[error] ", "").replace("[fatal] ", ""));
+
+                // // Adicionar em play ao adicionar arquivo à lista de incompatíveis
+                // debug!(target: Target::file_mail(), channel = channel_id;
+                //     "[play] Arquivo marcado como incompatível: - será substituído por filler com duração idêntica"
+                // );
+                return Err(ServiceError::DecodingError(
+                    format!("Erro de decodificação: {}", line.replace("[error] ", "").replace("[fatal] ", ""))
+                 ));
+            }
 
             if FFMPEG_UNRECOVERABLE_ERRORS
                 .iter()
@@ -1215,4 +1502,171 @@ pub fn calc_aspect(config: &PlayoutConfig, aspect_string: &Option<String>) -> f6
     }
 
     source_aspect
+}
+
+pub async fn detect_hw_accelerators() -> Vec<String> {
+    let mut accelerators = Vec::new();
+    
+    // Executar o comando para obter aceleradores
+    let output = match Command::new("ffmpeg")
+        .args(["-hide_banner", "-hwaccels"])
+        .output()
+        .await {
+            Ok(output) => output,
+            Err(e) => {
+                error!(target: Target::file_mail(), "Erro ao executar ffmpeg -hwaccels: {}", e);
+                return accelerators; // Retorna lista vazia em caso de erro
+            },
+        };
+    
+    // A saída vai para stdout no FFmpeg (confirmado pelo teste)
+    let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
+    
+    // Log para debug
+    debug!(target: Target::file_mail(), "Saída do comando hwaccels (stdout): {}", stdout_text);
+    
+    // Processar a saída conforme o formato esperado:
+    // "Hardware acceleration methods:"
+    // "vdpau"
+    // "cuda"
+    // etc.
+    let mut found_header = false;
+    for line in stdout_text.lines() {
+        let trimmed = line.trim();
+        
+        if trimmed == "Hardware acceleration methods:" {
+            found_header = true;
+            continue;
+        }
+        
+        if found_header && !trimmed.is_empty() {
+            accelerators.push(trimmed.to_string());
+        }
+    }
+    
+    // Log dos aceleradores encontrados
+    if accelerators.is_empty() {
+        warn!(target: Target::file_mail(), "Nenhum acelerador de hardware detectado");
+    } else {
+        info!(target: Target::file_mail(), "Aceleradores de hardware detectados: {:?}", accelerators);
+    }
+    
+    accelerators
+}
+
+// Determinar o sufixo do dispositivo baseado nos filtros atuais
+pub fn determine_hw_device_suffix(filter_chain: &str) -> Option<String> {
+    // Mapeamento de sufixos para seus dispositivos reais
+    const HW_DEVICE_MAPPING: [(&str, &str); 6] = [
+        ("_npp", "cuda"),    // _npp é um filtro CUDA
+        ("_cuda", "cuda"),
+        ("_opencl", "opencl"),
+        ("_vaapi", "vaapi"),
+        ("_vulkan", "vulkan"),
+        ("_qsv", "qsv")
+    ];
+    
+    // Procura o primeiro sufixo que corresponde e retorna o dispositivo mapeado
+    for (suffix, device) in &HW_DEVICE_MAPPING {
+        if filter_chain.contains(suffix) {
+            return Some(device.to_string());
+        }
+    }
+    
+    None
+}
+
+pub fn is_first_filter_hw(filter_chain: &str) -> bool {
+    const HW_FILTER_POSTFIX: &[&str] = &["_cuda", "_npp", "_opencl", "_vaapi", "_vulkan", "_qsv"];
+    
+    // Encontrar o início do primeiro filtro (após o primeiro [])
+    if let Some(filter_start_idx) = filter_chain.find(']') {
+        // Encontrar o fim do primeiro filtro (próxima vírgula ou fim da string)
+        let end_idx = filter_chain[filter_start_idx..].find(',')
+            .map(|idx| filter_start_idx + idx)
+            .unwrap_or(filter_chain.len());
+        
+        // Extrair o primeiro filtro
+        let first_filter = &filter_chain[filter_start_idx + 1..end_idx];
+        
+        // Verificar se contém algum dos pós-fixos de hardware
+        return HW_FILTER_POSTFIX.iter().any(|p| first_filter.contains(p));
+    }
+    
+    false
+}
+
+pub async fn modify_decoder_cmd_for_recovery(
+    dec_cmd: &mut Vec<String>,
+    filter: &mut Filters,
+    id: i32
+) -> Result<(), ServiceError> {
+    // Detectar aceleradores disponíveis
+    let hw_accels = detect_hw_accelerators().await;
+    
+    if hw_accels.is_empty() {
+        debug!(target: Target::file_mail(), channel = id;
+            "[play] Nenhum acelerador de hardware detectado para modo de recuperação");
+        return Ok(());
+    }
+    
+    // Determinar o dispositivo a partir da cadeia de filtros
+    let hw_device = match determine_hw_device_suffix(&filter.video_chain) {
+        Some(device) => device,
+        None => {
+            debug!(target: Target::file_mail(), channel = id;
+                "[play] Não foi possível determinar o dispositivo de hardware a partir dos filtros");
+            return Ok(());
+        }
+    };
+    
+    debug!(target: Target::file_mail(), channel = id;
+        "[play] Modo recovery: usando dispositivo de hardware {} para decodificação", hw_device);
+    
+    // Adicionar inicialização do dispositivo de hardware
+    dec_cmd.append(&mut vec_strings!["-init_hw_device", format!("{}={}:reset", hw_device, hw_device), "-filter_hw_device", format!("{}", hw_device)]);
+    
+    // Adicionar hwupload ao primeiro filtro de vídeo da cadeia APENAS se o primeiro filtro for de hardware
+    if let Some(first_filter_end) = filter.video_chain.find(']') {
+        // Verificar se o primeiro filtro é um filtro de hardware
+        if is_first_filter_hw(&filter.video_chain) {
+            // Dividir a cadeia de filtros no primeiro colchete de fechamento
+            let (input_part, filter_part) = filter.video_chain.split_at(first_filter_end + 1);
+            let is_first_filter_hwupload = {
+                // Remover espaços em branco iniciais do filter_part
+                let trimmed_filter_part = filter_part.trim_start();
+                
+                // Verificar se começa com "hwupload"
+                trimmed_filter_part.starts_with("hwupload")
+            };
+            
+            debug!(target: Target::file_mail(), channel = id;
+                "[play] Parte de filtros: '{}', primeiro filtro é hwupload? {}", 
+                filter_part, is_first_filter_hwupload);
+            
+            // Adicionar hwupload apenas se ainda não for o primeiro filtro
+            if !is_first_filter_hwupload {
+
+                if hw_accels.len() > 1 {
+                    // Múltiplos dispositivos disponíveis, usar hwupload específico
+                    let upload_cmd = format!("format=yuv420p,hwupload_{},", hw_device);
+                    filter.video_chain = format!("{}{}{}", input_part, upload_cmd, filter_part);
+                } else {
+                    // Apenas um dispositivo, usar hwupload genérico
+                    filter.video_chain = format!("{}format=yuv420p,hwupload,{}", input_part, filter_part);
+                }
+                
+                debug!(target: Target::file_mail(), channel = id;
+                    "[play] Cadeia de vídeo modificada para recuperação: {}", filter.video_chain);
+            } else {
+                debug!(target: Target::file_mail(), channel = id;
+                    "[play] Cadeia de vídeo já contém hwupload, não modificada");
+            }
+        } else {
+            debug!(target: Target::file_mail(), channel = id;
+                "[play] Primeiro filtro não é de hardware, não adicionando hwupload");
+        }
+    }
+    
+    Ok(())
 }

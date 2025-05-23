@@ -1,0 +1,937 @@
+diff --git engine/src/file/local.rs engine/src/file/local.rs
+index 0ae2a6cd..219dc1f4 100644
+--- engine/src/file/local.rs
++++ engine/src/file/local.rs
+@@ -17,6 +17,7 @@ use tokio_stream::StreamExt;
+ 
+ use crate::file::{norm_abs_path, watcher::watch, MoveObject, PathObject, Storage, VideoFile};
+ use crate::player::utils::{file_extension, include_file_extension, probe::MediaProbe, Media};
++use crate::player::controller::ChannelManager;
+ use crate::utils::{config::PlayoutConfig, errors::ServiceError, logging::Target};
+ 
+ #[derive(Clone, Debug)]
+@@ -294,9 +295,10 @@ impl Storage for LocalStorage {
+         config: PlayoutConfig,
+         is_alive: Arc<AtomicBool>,
+         sources: Arc<Mutex<Vec<Media>>>,
++        manager: Option<Arc<ChannelManager>>,
+     ) {
+         self.watch_handler = Arc::new(Mutex::new(Some(tokio::spawn(async {
+-            watch(config, is_alive, sources).await;
++            watch(config, is_alive, sources, manager).await;
+         }))));
+     }
+ 
+@@ -312,6 +314,7 @@ impl Storage for LocalStorage {
+         &mut self,
+         config: &PlayoutConfig,
+         fillers: Option<Arc<Mutex<Vec<Media>>>>,
++        manager: Option<Arc<ChannelManager>>,
+     ) -> Vec<Media> {
+         let id = config.general.channel_id;
+         let mut filler_list = vec![];
+@@ -324,7 +327,7 @@ impl Storage for LocalStorage {
+ 
+             while let Some(Ok(entry)) = entries.next().await {
+                 if entry.path().is_file() && include_file_extension(config, &entry.path()) {
+-                    let mut media = Media::new(index, &entry.path().to_string_lossy(), false).await;
++                    let mut media = Media::new(index, &entry.path().to_string_lossy(), false, None).await;
+ 
+                     if fillers.is_none() {
+                         if let Err(e) = media.add_probe(false).await {
+@@ -354,7 +357,7 @@ impl Storage for LocalStorage {
+             }
+         } else if filler_path.is_file() {
+             let mut media =
+-                Media::new(0, &config.storage.filler_path.to_string_lossy(), false).await;
++                Media::new(0, &config.storage.filler_path.to_string_lossy(), false, None).await;
+ 
+             if fillers.is_none() {
+                 if let Err(e) = media.add_probe(false).await {
+diff --git engine/src/file/mod.rs engine/src/file/mod.rs
+index 1a3a5b5c..250b21fe 100644
+--- engine/src/file/mod.rs
++++ engine/src/file/mod.rs
+@@ -14,6 +14,7 @@ mod watcher;
+ 
+ use crate::player::utils::Media;
+ use crate::utils::{config::PlayoutConfig, errors::ServiceError};
++use crate::player::controller::ChannelManager;
+ 
+ #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+ pub struct PathObject {
+@@ -112,10 +113,11 @@ impl StorageBackend {
+         config: PlayoutConfig,
+         is_alive: Arc<AtomicBool>,
+         sources: Arc<Mutex<Vec<Media>>>,
++        manager: Option<Arc<ChannelManager>>,
+     ) {
+         match self {
+-            StorageBackend::Local(storage) => storage.watchman(config, is_alive, sources).await,
+-            StorageBackend::S3(storage) => storage.watchman(config, is_alive, sources).await,
++            StorageBackend::Local(storage) => storage.watchman(config, is_alive, sources, manager).await,
++            StorageBackend::S3(storage) => storage.watchman(config, is_alive, sources, manager).await,
+         }
+     }
+ 
+@@ -130,10 +132,11 @@ impl StorageBackend {
+         &mut self,
+         config: &PlayoutConfig,
+         fillers: Option<Arc<Mutex<Vec<Media>>>>,
++        manager: Option<Arc<ChannelManager>>,
+     ) -> Vec<Media> {
+         match self {
+-            StorageBackend::Local(storage) => storage.fill_filler_list(config, fillers).await,
+-            StorageBackend::S3(storage) => storage.fill_filler_list(config, fillers).await,
++            StorageBackend::Local(storage) => storage.fill_filler_list(config, fillers, manager).await,
++            StorageBackend::S3(storage) => storage.fill_filler_list(config, fillers, manager).await,
+         }
+     }
+ 
+@@ -170,12 +173,14 @@ trait Storage {
+         config: PlayoutConfig,
+         is_alive: Arc<AtomicBool>,
+         sources: Arc<Mutex<Vec<Media>>>,
++        manager: Option<Arc<ChannelManager>>,
+     );
+     async fn stop_watch(&mut self);
+     async fn fill_filler_list(
+         &mut self,
+         config: &PlayoutConfig,
+         fillers: Option<Arc<Mutex<Vec<Media>>>>,
++        manager: Option<Arc<ChannelManager>>,
+     ) -> Vec<Media>;
+     async fn copy_assets(&self) -> Result<(), std::io::Error>;
+     fn is_dir<P: AsRef<Path>>(&self, input: P) -> bool;
+diff --git engine/src/file/s3.rs engine/src/file/s3.rs
+index 26b825bc..a6481eb9 100644
+--- engine/src/file/s3.rs
++++ engine/src/file/s3.rs
+@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
+ use crate::file::{MoveObject, PathObject, Storage};
+ use crate::player::utils::Media;
+ use crate::utils::{config::PlayoutConfig, errors::ServiceError};
++use crate::player::controller::ChannelManager;
+ 
+ #[derive(Clone, Debug)]
+ pub struct S3Storage {
+@@ -49,6 +50,7 @@ impl Storage for S3Storage {
+         _config: PlayoutConfig,
+         _is_alive: Arc<AtomicBool>,
+         _sources: Arc<Mutex<Vec<Media>>>,
++        manager: Option<Arc<ChannelManager>>,
+     ) {
+     }
+ 
+@@ -58,6 +60,7 @@ impl Storage for S3Storage {
+         &mut self,
+         _config: &PlayoutConfig,
+         _fillers: Option<Arc<Mutex<Vec<Media>>>>,
++        _manager: Option<Arc<ChannelManager>>,
+     ) -> Vec<Media> {
+         vec![]
+     }
+diff --git engine/src/file/watcher.rs engine/src/file/watcher.rs
+index 726acb92..c902c2c0 100644
+--- engine/src/file/watcher.rs
++++ engine/src/file/watcher.rs
+@@ -18,6 +18,7 @@ use notify_debouncer_full::new_debouncer;
+ use tokio::sync::Mutex;
+ 
+ use crate::player::utils::{include_file_extension, Media};
++use crate::player::controller::ChannelManager;
+ use crate::utils::{config::PlayoutConfig, logging::Target};
+ 
+ /// Create a watcher, which monitor file changes.
+@@ -27,6 +28,7 @@ pub async fn watch(
+     config: PlayoutConfig,
+     is_alive: Arc<AtomicBool>,
+     sources: Arc<Mutex<Vec<Media>>>,
++    manager: Option<Arc<ChannelManager>>,
+ ) {
+     let id = config.general.channel_id;
+     let path = Path::new(&config.channel.storage);
+@@ -58,7 +60,7 @@ pub async fn watch(
+                                 if new_path.is_file() && include_file_extension(&config, new_path) {
+                                     let index = sources.lock().await.len();
+                                     let media =
+-                                        Media::new(index, &new_path.to_string_lossy(), false).await;
++                                        Media::new(index, &new_path.to_string_lossy(), false, None).await;
+ 
+                                     sources.lock().await.push(media);
+                                     info!(target: Target::file_mail(), channel = id; "Create new file: <b><magenta>{new_path:?}</></b>");
+@@ -88,13 +90,13 @@ pub async fn watch(
+                                     .position(|x| *x.source == old_path.display().to_string())
+                                 {
+                                     let media =
+-                                        Media::new(index, &new_path.to_string_lossy(), false).await;
++                                        Media::new(index, &new_path.to_string_lossy(), false, None).await;
+                                     media_list[index] = media;
+                                     info!(target: Target::file_mail(), channel = id; "Move file: <b><magenta>{old_path:?}</></b> to <b><magenta>{new_path:?}</></b>");
+                                 } else if include_file_extension(&config, new_path) {
+                                     let index = media_list.len();
+                                     let media =
+-                                        Media::new(index, &new_path.to_string_lossy(), false).await;
++                                        Media::new(index, &new_path.to_string_lossy(), false, None).await;
+ 
+                                     media_list.push(media);
+                                     info!(target: Target::file_mail(), channel = id; "Create new file: <b><magenta>{new_path:?}</></b>");
+diff --git engine/src/main.rs engine/src/main.rs
+index b0875de1..873dfb20 100644
+--- engine/src/main.rs
++++ engine/src/main.rs
+@@ -249,6 +249,7 @@ async fn main() -> Result<(), ProcessError> {
+                     Arc::new(Mutex::new(Vec::new())),
+                     playlist,
+                     Arc::new(AtomicBool::new(false)),
++                    manager.incompatible_files.clone(),
+                 )
+                 .await;
+             } else if ARGS.test_mail {
+diff --git engine/src/player/controller.rs engine/src/player/controller.rs
+index 3039bd71..a6866ed6 100644
+--- engine/src/player/controller.rs
++++ engine/src/player/controller.rs
+@@ -31,6 +31,7 @@ use crate::{
+     file::{init_storage, select_storage_type, StorageBackend},
+     player::{output::player, utils::Media},
+ };
++use std::collections::HashSet;
+ 
+ const VERSION: &str = env!("CARGO_PKG_VERSION");
+ 
+@@ -77,6 +78,7 @@ pub struct ChannelManager {
+     pub current_index: Arc<AtomicUsize>,
+     pub filler_index: Arc<AtomicUsize>,
+     pub storage: Arc<Mutex<StorageBackend>>,
++    pub incompatible_files: Arc<Mutex<HashSet<String>>>,
+ }
+ 
+ impl ChannelManager {
+@@ -116,6 +118,7 @@ impl ChannelManager {
+             filter_chain: None,
+             current_date: Arc::new(Mutex::new(String::new())),
+             storage,
++            incompatible_files: Arc::new(Mutex::new(HashSet::new())),
+         }
+     }
+ 
+@@ -384,11 +387,26 @@ async fn run_channel(manager: ChannelManager) -> Result<(), ServiceError> {
+             .storage
+             .lock()
+             .await
+-            .fill_filler_list(&config, Some(filler_list))
++            .fill_filler_list(&config, Some(filler_list), Some(manager.clone().into()))
+             .await;
+     }
+ 
+-    player(manager).await
++
++        match player(manager.clone()).await {
++            Ok(()) => return Ok(()),
++            Err(ServiceError::DecodingError(_)) => {
++                // Quando encontramos um erro de decodificação:
++                // 1. O arquivo já foi marcado como incompatível
++                // 2. list_init foi setado para true
++                // 3. Na próxima iteração, next() vai substituir por filler
++                return Ok(());
++            },
++            Err(e) => return Err(e),
++        }
++
++    // Adicionar retorno explícito após o loop
++    //Ok(())
++
+ }
+ 
+ pub async fn drain_hls_path(path: &Path) -> io::Result<()> {
+diff --git engine/src/player/input/folder.rs engine/src/player/input/folder.rs
+index 61e51ca2..e2dae2b5 100644
+--- engine/src/player/input/folder.rs
++++ engine/src/player/input/folder.rs
+@@ -49,7 +49,7 @@ impl FolderSource {
+ 
+             while let Some(Ok(entry)) = entries.next().await {
+                 if entry.path().is_file() && include_file_extension(config, &entry.path()) {
+-                    let media = Media::new(0, &entry.path().to_string_lossy(), false).await;
++                    let media = Media::new(0, &entry.path().to_string_lossy(), false, Some(manager.clone())).await;
+                     media_list.push(media);
+                 }
+             }
+diff --git engine/src/player/input/ingest.rs engine/src/player/input/ingest.rs
+index f257e2e3..ccd0d869 100644
+--- engine/src/player/input/ingest.rs
++++ engine/src/player/input/ingest.rs
+@@ -74,7 +74,7 @@ pub async fn ingest_server(
+     let id = config.general.channel_id;
+     let mut server_cmd = vec_strings!["-hide_banner", "-nostats", "-v", "level+info"];
+     let stream_input = config.ingest.input_cmd.clone().unwrap();
+-    let mut dummy_media = Media::new(0, "Live Stream", false).await;
++    let mut dummy_media = Media::new(0, "Live Stream", false, None).await;
+     dummy_media.unit = Ingest;
+     dummy_media.add_filter(&config, &None).await;
+     let is_alive = manager.is_alive.clone();
+diff --git engine/src/player/input/mod.rs engine/src/player/input/mod.rs
+index d1ec4318..03e8f37f 100644
+--- engine/src/player/input/mod.rs
++++ engine/src/player/input/mod.rs
+@@ -39,7 +39,7 @@ pub async fn source_generator(manager: ChannelManager) -> SourceIterator {
+             // Spawn a task to monitor folder for file changes.
+             {
+                 let mut storage = manager.storage.lock().await;
+-                storage.watchman(config_clone, is_alive, current_list).await;
++                storage.watchman(config_clone, is_alive, current_list, Some(manager.clone().into())).await;
+             }
+ 
+             let folder_source = FolderSource::new(&config, manager);
+diff --git engine/src/player/input/playlist.rs engine/src/player/input/playlist.rs
+index c74b9d24..f3aedcf1 100644
+--- engine/src/player/input/playlist.rs
++++ engine/src/player/input/playlist.rs
+@@ -24,6 +24,10 @@ use crate::utils::{
+     logging::Target,
+ };
+ 
++use crate::player::controller::ProcessUnit::Decoder;
++use crate::player::controller::ProcessUnit::Encoder;
++
++
+ /// Struct for current playlist.
+ ///
+ /// Here we prepare the init clip and build a iterator where we pull our clips.
+@@ -91,6 +95,7 @@ impl CurrentProgram {
+                 self.is_alive.clone(),
+                 seek,
+                 false,
++                Some(self.manager.clone()),
+             )
+             .await;
+ 
+@@ -184,6 +189,7 @@ impl CurrentProgram {
+                 self.is_alive.clone(),
+                 false,
+                 true,
++                Some(self.manager.clone()),
+             )
+             .await;
+ 
+@@ -306,6 +312,46 @@ impl CurrentProgram {
+             // Important! When no manual drop is happen here, lock is still active in handle_list_init
+             drop(nodes);
+ 
++            let current_index = self.manager.current_index.load(Ordering::SeqCst);
++    
++            // Verificar se o arquivo atual é incompatível
++            let is_incompatível = {
++                let node_list = self.manager.current_list.lock().await;
++                if current_index < node_list.len() {
++                    let node = &node_list[current_index];
++                    let incompatible_files = self.manager.incompatible_files.lock().await;
++                    incompatible_files.contains(&node.source)
++                } else {
++                    false
++                }
++            };
++        
++            if is_incompatível {
++                // Se for incompatível, criar um media com filler
++                let index = self.manager.current_index.load(Ordering::SeqCst);
++                let node_list = self.manager.current_list.lock().await;
++                let mut original_node = node_list[current_index].clone();
++                drop(node_list);
++                
++                // Chave da solução: forçar probe para None para acionar lógica de filler
++                original_node.probe = None;
++                original_node.probe_audio = None;
++                original_node.source = String::new(); // Limpar source para garantir
++        
++                // Manter timing original
++                let duration = original_node.out - original_node.seek;
++                original_node.duration = duration;
++                original_node.out = duration;
++        
++                // Gerar filler usando a lógica existente
++                self.gen_source(original_node, index).await;
++                
++                // Avançar para o próximo após substituir por filler
++                self.manager.current_index.fetch_add(1, Ordering::SeqCst);
++                
++                return true;
++            }
++
+             trace!("Clip from init: {}", node_clone.source);
+ 
+             node_clone.seek += time_sec
+@@ -333,7 +379,7 @@ impl CurrentProgram {
+     async fn fill_end(&mut self, total_delta: f64) {
+         // Fill end from playlist
+         let index = self.manager.current_index.load(Ordering::SeqCst);
+-        let mut media = Media::new(index, "", false).await;
++        let mut media = Media::new(index, "", false, Some(self.manager.clone())).await;
+         media.begin = Some(time_in_seconds(&self.config.channel.timezone));
+         media.duration = total_delta;
+         media.out = total_delta;
+@@ -765,7 +811,7 @@ impl CurrentProgram {
+                     last_index = length - 1;
+                 }
+ 
+-                let mut media = Media::new(length, "", false).await;
++                let mut media = Media::new(length, "", false, Some(self.manager.clone())).await;
+                 media.begin = Some(current_time);
+                 media.duration = total_delta;
+                 media.out = total_delta;
+@@ -787,6 +833,46 @@ impl CurrentProgram {
+ 
+             drop(node_list);
+ 
++            let current_index = self.manager.current_index.load(Ordering::SeqCst);
++    
++            // Verificar se o arquivo atual é incompatível
++            let is_incompatível = {
++                let node_list = self.manager.current_list.lock().await;
++                if current_index < node_list.len() {
++                    let node = &node_list[current_index];
++                    let incompatible_files = self.manager.incompatible_files.lock().await;
++                    incompatible_files.contains(&node.source)
++                } else {
++                    false
++                }
++            };
++        
++            if is_incompatível {
++                // Se for incompatível, criar um media com filler
++                let index = self.manager.current_index.load(Ordering::SeqCst);
++                let node_list = self.manager.current_list.lock().await;
++                let mut original_node = node_list[current_index].clone();
++                drop(node_list);
++                
++                // Chave da solução: forçar probe para None para acionar lógica de filler
++                original_node.probe = None;
++                original_node.probe_audio = None;
++                original_node.source = String::new(); // Limpar source para garantir
++        
++                // Manter timing original
++                let duration = original_node.out - original_node.seek;
++                original_node.duration = duration;
++                original_node.out = duration;
++        
++                // Gerar filler usando a lógica existente
++                self.gen_source(original_node, index).await;
++                
++                // Avançar para o próximo após substituir por filler
++                self.manager.current_index.fetch_add(1, Ordering::SeqCst);
++                
++                return Some(self.current_node.clone());
++            }
++
+             if index == last_index {
+                 is_last = true;
+             }
+diff --git engine/src/player/output/hls.rs engine/src/player/output/hls.rs
+index 477d46ff..5c1fd55e 100644
+--- engine/src/player/output/hls.rs
++++ engine/src/player/output/hls.rs
+@@ -62,7 +62,7 @@ async fn ingest_writer(manager: ChannelManager) -> Result<(), ServiceError> {
+     let chain = manager.filter_chain.clone();
+     let stream_input = config.ingest.input_cmd.clone().unwrap();
+     let mut server_prefix = vec_strings!["-hide_banner", "-nostats", "-v", "level+info"];
+-    let mut dummy_media = Media::new(0, "Live Stream", false).await;
++    let mut dummy_media = Media::new(0, "Live Stream", false, None).await;
+ 
+     dummy_media.unit = Ingest;
+     dummy_media.add_filter(&config, &chain).await;
+diff --git engine/src/player/output/mod.rs engine/src/player/output/mod.rs
+index e16b31af..8bbec948 100644
+--- engine/src/player/output/mod.rs
++++ engine/src/player/output/mod.rs
+@@ -183,8 +183,63 @@ async fn play(
+         drop(decoder_stdout);
+ 
+         manager.wait(Decoder).await;
+-        error_decoder_task.await??;
+-    }
++        // Na parte onde você trata o resultado de error_decoder_task
++        // Na parte onde o erro de decodificação é tratado 
++        // (após a linha error_decoder_task.await??;)
++        // Modificar como a função lida com o resultado da task do decodificador
++        match error_decoder_task.await {
++            Ok(Ok(())) => {
++                // Decodificação bem-sucedida
++                //continue;
++            },
++            Ok(Err(ServiceError::DecodingError(msg))) => {
++                error!(target: Target::file_mail(), channel = id; 
++                    "Arquivo incompatível detectado: {}: {}", node.source, msg);
++                
++                // Marcar arquivo como incompatível
++                {
++                    let mut incompatible_files = manager.incompatible_files.lock().await;
++                    incompatible_files.insert(node.source.clone());
++                }
++
++                let current_index = manager.current_index.load(Ordering::SeqCst);
++    
++                // Verificar se o arquivo atual é incompatível
++                let is_incompatível = {
++                    let node_list = manager.current_list.lock().await;
++                    if current_index < node_list.len() {
++                        let node = &node_list[current_index];
++                        let incompatible_files = manager.incompatible_files.lock().await;
++                        incompatible_files.contains(&node.source)
++                    } else {
++                        false
++                    }
++                };
++            
++                if is_incompatível {
++                    let node_list = manager.current_list.lock().await;
++                    let mut original_node = node_list[current_index].clone();
++                    drop(node_list);
++                    
++                    // Chave da solução: forçar probe para None para acionar lógica de filler
++                    original_node.probe = None;
++                    original_node.probe_audio = None;
++                    original_node.source = String::new(); // Limpar source para garantir
++            
++                    // Manter timing original
++                    let duration = original_node.out - original_node.seek;
++                    original_node.duration = duration;
++                    original_node.out = duration;
++            
++                    //manager.current_index.fetch_add(1, Ordering::SeqCst);
++                    
++                }
++                //continue;
++            },
++            Ok(Err(e)) => return Err(e),
++            Err(_) => return Err(ServiceError::InternalServerError),
++        }
++        }
+ 
+     Ok(())
+ }
+diff --git engine/src/player/utils/import.rs engine/src/player/utils/import.rs
+index c30fe8b1..9b1121e2 100644
+--- engine/src/player/utils/import.rs
++++ engine/src/player/utils/import.rs
+@@ -50,7 +50,7 @@ pub async fn import_file(
+     let mut lines = reader.lines();
+     while let Some(line) = lines.next_line().await? {
+         if !line.starts_with('#') {
+-            let item = Media::new(0, &line, true).await;
++            let item = Media::new(0, &line, true, None).await;
+ 
+             if item.duration > 0.0 {
+                 playlist.program.push(item);
+diff --git engine/src/player/utils/json_serializer.rs engine/src/player/utils/json_serializer.rs
+index 0d0ed0b6..fb27d64c 100644
+--- engine/src/player/utils/json_serializer.rs
++++ engine/src/player/utils/json_serializer.rs
+@@ -12,6 +12,8 @@ use crate::player::utils::{
+     PlayoutConfig,
+ };
+ use crate::utils::{config::DUMMY_LEN, logging::Target};
++use crate::player::controller::ChannelManager;
++use std::collections::HashSet;
+ 
+ /// This is our main playlist object, it holds all necessary information for the current day.
+ #[derive(Debug, Serialize, Deserialize, Clone)]
+@@ -98,6 +100,7 @@ pub async fn read_json(
+     is_alive: Arc<AtomicBool>,
+     seek: bool,
+     get_next: bool,
++    manager: Option<ChannelManager>,
+ ) -> JsonPlaylist {
+     let id = config.general.channel_id;
+     let config_clone = config.clone();
+@@ -145,12 +148,20 @@ pub async fn read_json(
+                     let list_clone = playlist.clone();
+ 
+                     if !config.general.skip_validation {
++
++                        let incompatible_files = manager
++                        .as_ref()
++                        .map(|mgr| mgr.incompatible_files.clone())
++                        .unwrap_or_else(|| Arc::new(Mutex::new(HashSet::new())));
++                
+                         tokio::spawn(validate_playlist(
+                             config_clone,
+                             current_list,
+                             list_clone,
+                             is_alive,
++                            incompatible_files,
+                         ));
++                    
+                     }
+ 
+                     set_defaults(&mut playlist);
+@@ -192,11 +203,18 @@ pub async fn read_json(
+         let list_clone = playlist.clone();
+ 
+         if !config.general.skip_validation {
++            
++            let incompatible_files = manager
++            .as_ref()
++            .map(|mgr| mgr.incompatible_files.clone())
++            .unwrap_or_else(|| Arc::new(Mutex::new(HashSet::new())));
++    
+             tokio::spawn(validate_playlist(
+                 config_clone,
+                 current_list,
+                 list_clone,
+                 is_alive,
++                incompatible_files,
+             ));
+         }
+ 
+diff --git engine/src/player/utils/json_validate.rs engine/src/player/utils/json_validate.rs
+index 650a0916..50658818 100644
+--- engine/src/player/utils/json_validate.rs
++++ engine/src/player/utils/json_validate.rs
+@@ -25,6 +25,7 @@ use crate::utils::{
+     logging::Target,
+ };
+ use crate::vec_strings;
++use std::collections::HashSet;
+ 
+ /// Validate a single media file.
+ ///
+@@ -163,6 +164,7 @@ pub async fn validate_playlist(
+     current_list: Arc<Mutex<Vec<Media>>>,
+     mut playlist: JsonPlaylist,
+     is_alive: Arc<AtomicBool>,
++    incompatible_files: Arc<Mutex<HashSet<String>>>,
+ ) {
+     let id = config.general.channel_id;
+     let date = playlist.date;
+@@ -185,6 +187,20 @@ pub async fn validate_playlist(
+             return;
+         }
+ 
++        // Verificar se já é conhecido como incompatível
++        let is_incompatible = {
++            let files = incompatible_files.lock().await;
++            files.contains(&item.source)
++        };
++        
++        if is_incompatible {
++            debug!(target: Target::file_mail(), channel = id;
++                "[Validation] Pulando arquivo incompatível conhecido: {}", 
++                item.source
++            );
++            continue;
++        }
++
+         let pos = index + 1;
+ 
+         if !is_remote(&item.source) {
+diff --git engine/src/player/utils/mod.rs engine/src/player/utils/mod.rs
+index b086eeef..85fc1651 100644
+--- engine/src/player/utils/mod.rs
++++ engine/src/player/utils/mod.rs
+@@ -38,7 +38,7 @@ use crate::player::{
+     filter::{filter_chains, Filters},
+ };
+ use crate::utils::{
+-    config::{OutputMode::*, PlayoutConfig, FFMPEG_IGNORE_ERRORS, FFMPEG_UNRECOVERABLE_ERRORS},
++    config::{OutputMode::*, PlayoutConfig, FFMPEG_IGNORE_ERRORS, FFMPEG_UNRECOVERABLE_ERRORS, FFMPEG_DECODING_ERRORS},
+     errors::ServiceError,
+     logging::Target,
+     time_machine::time_now,
+@@ -248,10 +248,13 @@ pub struct Media {
+ 
+     #[serde(default, skip_serializing)]
+     pub unit: ProcessUnit,
++
++    #[serde(skip_serializing, skip_deserializing)]
++    pub manager: Option<ChannelManager>, // Novo campo
+ }
+ 
+ impl Media {
+-    pub async fn new(index: usize, src: &str, do_probe: bool) -> Self {
++    pub async fn new(index: usize, src: &str, do_probe: bool, manager: Option<ChannelManager>) -> Self {
+         let mut duration = 0.0;
+         let mut probe = None;
+ 
+@@ -283,12 +286,31 @@ impl Media {
+             next_ad: false,
+             skip: false,
+             unit: Decoder,
++            manager: None,
+         }
+     }
+ 
+     pub async fn add_probe(&mut self, check_audio: bool) -> Result<(), String> {
+         let mut errors = vec![];
+ 
++        // Nova verificação: checar se o arquivo está na lista de incompatíveis do manager
++        if let Some(manager) = &self.manager {  // Precisaremos adicionar o campo manager à estrutura Media
++            let is_incompatible = {
++                let incompatible_files = manager.incompatible_files.lock().await;
++                incompatible_files.contains(&self.source)
++            };
++
++            if is_incompatible {
++                // Limpar todas as informações de probe para arquivo incompatível
++                self.probe = None;
++                self.probe_audio = None;
++                self.duration = 0.0;
++                self.duration_audio = 0.0;
++                self.cmd = None;
++                return Ok(());
++            }
++        }
++
+         if self.probe.is_none() {
+             match MediaProbe::new(&self.source).await {
+                 Ok(probe) => {
+@@ -362,6 +384,7 @@ impl Default for Media {
+             next_ad: false,
+             skip: false,
+             unit: Decoder,
++            manager: None,
+         }
+     }
+ }
+@@ -883,6 +906,15 @@ pub async fn stderr_reader(
+                 line.replace("[error] ", "").replace("[fatal] ", "")
+             );
+ 
++            if FFMPEG_DECODING_ERRORS.iter().any(|e| line.contains(e)) {
++                warn!(target: Target::file_mail(), channel = channel_id;
++                    "<bright black>[{suffix}]</> Detectado erro de decodificação, alternando para filler"
++                );
++                return Err(ServiceError::DecodingError(
++                    format!("Erro de decodificação: {}", line.replace("[error] ", "").replace("[fatal] ", ""))
++                ));
++            }
++
+             if FFMPEG_UNRECOVERABLE_ERRORS
+                 .iter()
+                 .any(|i| line.contains(*i))
+diff --git engine/src/utils/config.rs engine/src/utils/config.rs
+index aa15679b..7f334079 100644
+--- engine/src/utils/config.rs
++++ engine/src/utils/config.rs
+@@ -58,6 +58,16 @@ pub const FFMPEG_UNRECOVERABLE_ERRORS: [&str; 9] = [
+     "Option not found",
+ ];
+ 
++pub const FFMPEG_DECODING_ERRORS: [&str; 7] = [
++    "no frame",
++    "Invalid data found when processing input",
++    "CUDA_ERROR_OUT_OF_MEMORY",
++    "CUDA_ERROR_INVALID_VALUE",
++    "CUDA_ERROR_INVALID_CONTEXT",
++    "No device available for decoder",
++    "Failed to allocate frame to upload to",
++];
++
+ #[derive(Debug, Clone, Default, Eq, PartialEq, Deserialize, Serialize, TS)]
+ #[ts(export, export_to = "playout_config.d.ts")]
+ #[serde(rename_all = "lowercase")]
+diff --git engine/src/utils/errors.rs engine/src/utils/errors.rs
+index 1bd6fac1..899d30d5 100644
+--- engine/src/utils/errors.rs
++++ engine/src/utils/errors.rs
+@@ -27,6 +27,9 @@ pub enum ServiceError {
+ 
+     #[display("ServiceUnavailable: {_0}")]
+     ServiceUnavailable(String),
++
++    #[display("DecodingError: {_0}")]
++    DecodingError(String),
+ }
+ 
+ // impl ResponseError trait allows to convert our errors into http responses with appropriate data
+@@ -43,6 +46,9 @@ impl ResponseError for ServiceError {
+             Self::NoContent(ref message) => HttpResponse::NoContent().json(message),
+             Self::ServiceUnavailable(ref message) => {
+                 HttpResponse::ServiceUnavailable().json(message)
++            },
++            Self::DecodingError(ref message) => {
++                HttpResponse::UnprocessableEntity().json(message)
+             }
+         }
+     }
+diff --git engine/src/utils/generator.rs engine/src/utils/generator.rs
+index 350333d3..461c7863 100644
+--- engine/src/utils/generator.rs
++++ engine/src/utils/generator.rs
+@@ -100,7 +100,7 @@ pub async fn filler_list(
+         .storage
+         .lock()
+         .await
+-        .fill_filler_list(config, None)
++        .fill_filler_list(config, None, Some(manager.clone().into()))
+         .await;
+     let mut index = 0;
+     let mut filler_clip_list: Vec<Media> = vec![];
+@@ -165,7 +165,7 @@ pub async fn generate_from_template(
+             }
+ 
+             for entry in file_list {
+-                let media = Media::new(0, &entry, true).await;
++                let media = Media::new(0, &entry, true, Some(manager.clone())).await;
+                 source_list.push(media);
+             }
+         }
+diff --git tests/src/engine_cmd.rs tests/src/engine_cmd.rs
+index 6f4bd76b..6cd317d5 100644
+--- tests/src/engine_cmd.rs
++++ tests/src/engine_cmd.rs
+@@ -44,7 +44,7 @@ async fn video_audio_input() {
+     let logo_path = fs::canonicalize("./assets/logo.png").unwrap();
+     config.processing.logo_path = logo_path.to_string_lossy().to_string();
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd =
+@@ -71,7 +71,7 @@ async fn video_audio_custom_filter1_input() {
+     config.processing.add_logo = false;
+     config.processing.custom_filter = "[0:v]gblur=2[c_v_out];[0:a]volume=0.2[c_a_out]".to_string();
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd = vec_strings![
+@@ -99,7 +99,7 @@ async fn video_audio_custom_filter2_input() {
+         "[0:v]null[v];movie=logo.png[l];[v][l]overlay[c_v_out];[0:a]volume=0.2[c_a_out]"
+             .to_string();
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd = vec_strings![
+@@ -126,7 +126,7 @@ async fn video_audio_custom_filter3_input() {
+     config.processing.custom_filter =
+         "[v_in];movie=logo.png[l];[v_in][l]overlay[c_v_out];[0:a]volume=0.2[c_a_out]".to_string();
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd = vec_strings![
+@@ -152,7 +152,7 @@ async fn dual_audio_aevalsrc_input() {
+     config.processing.audio_tracks = 2;
+     config.processing.add_logo = false;
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd =
+@@ -179,7 +179,7 @@ async fn dual_audio_input() {
+     config.processing.audio_tracks = 2;
+     config.processing.add_logo = false;
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd = vec_strings![
+@@ -205,7 +205,7 @@ async fn video_separate_audio_input() {
+     config.processing.audio_tracks = 1;
+     config.processing.add_logo = false;
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/no_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/no_audio.mp4", true, None).await;
+     media.audio = "./assets/media_mix/audio.mp3".to_string();
+     media.cmd = Some(seek_and_length(&config, &mut media));
+     media.add_filter(&config, &None).await;
+@@ -1402,7 +1402,7 @@ async fn video_audio_hls() {
+         "/usr/share/ffplayout/public/live/stream.m3u8"
+     ]);
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let enc_prefix = vec_strings![
+@@ -1492,7 +1492,7 @@ async fn video_audio_sub_meta_hls() {
+         "/usr/share/ffplayout/public/live/stream.m3u8"
+     ]);
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let enc_prefix = vec_strings![
+@@ -1583,7 +1583,7 @@ async fn video_multi_audio_hls() {
+         "/usr/share/ffplayout/public/live/stream.m3u8"
+     ]);
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let enc_prefix = vec_strings![
+@@ -1689,7 +1689,7 @@ async fn multi_video_audio_hls() {
+         "/usr/share/ffplayout/public/live/stream_%v.m3u8"
+     ]);
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let enc_prefix = vec_strings![
+@@ -1806,7 +1806,7 @@ async fn multi_video_multi_audio_hls() {
+         "/usr/share/ffplayout/public/live/stream_%v.m3u8"
+     ]);
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let enc_prefix = vec_strings![
+diff --git tests/src/engine_filter.rs tests/src/engine_filter.rs
+index d84a3967..51bfb4f4 100644
+--- tests/src/engine_filter.rs
++++ tests/src/engine_filter.rs
+@@ -40,7 +40,7 @@ async fn simple_filtering() {
+     let logo_path = fs::canonicalize("./assets/logo.png").unwrap();
+     config.processing.logo_path = logo_path.to_string_lossy().to_string();
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let _f = media.filter.unwrap().cmd();
+diff --git tests/src/engine_generator.rs tests/src/engine_generator.rs
+index a37bf180..5e3b00dd 100644
+--- tests/src/engine_generator.rs
++++ tests/src/engine_generator.rs
+@@ -43,10 +43,10 @@ async fn prepare_config() -> (PlayoutConfig, ChannelManager) {
+ #[tokio::test]
+ async fn test_random_list() {
+     let clip_list = vec![
+-        Media::new(0, "./assets/media_mix/with_audio.mp4", true).await, // 30 seconds
+-        Media::new(0, "./assets/media_mix/dual_audio.mp4", true).await, // 30 seconds
+-        Media::new(0, "./assets/media_mix/av_sync.mp4", true).await,    // 30 seconds
+-        Media::new(0, "./assets/media_mix/ad.mp4", true).await,         // 25 seconds
++        Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await, // 30 seconds
++        Media::new(0, "./assets/media_mix/dual_audio.mp4", true, None).await, // 30 seconds
++        Media::new(0, "./assets/media_mix/av_sync.mp4", true, None).await,    // 30 seconds
++        Media::new(0, "./assets/media_mix/ad.mp4", true, None).await,         // 25 seconds
+     ];
+ 
+     let r_list = random_list(clip_list.clone(), 200.0);
+@@ -59,10 +59,10 @@ async fn test_random_list() {
+ #[tokio::test]
+ async fn test_ordered_list() {
+     let clip_list = vec![
+-        Media::new(0, "./assets/media_mix/with_audio.mp4", true).await, // 30 seconds
+-        Media::new(0, "./assets/media_mix/dual_audio.mp4", true).await, // 30 seconds
+-        Media::new(0, "./assets/media_mix/av_sync.mp4", true).await,    // 30 seconds
+-        Media::new(0, "./assets/media_mix/ad.mp4", true).await,         // 25 seconds
++        Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await, // 30 seconds
++        Media::new(0, "./assets/media_mix/dual_audio.mp4", true, None).await, // 30 seconds
++        Media::new(0, "./assets/media_mix/av_sync.mp4", true, None).await,    // 30 seconds
++        Media::new(0, "./assets/media_mix/ad.mp4", true, None).await,         // 25 seconds
+     ];
+ 
+     let o_list = ordered_list(clip_list.clone(), 85.0);

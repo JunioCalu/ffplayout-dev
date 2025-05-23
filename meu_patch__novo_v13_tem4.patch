@@ -1,0 +1,2813 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 4b7ce718..638d9cb3 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1408,6 +1408,7 @@ dependencies = [
+  "nix",
+  "notify",
+  "notify-debouncer-full",
++ "once_cell",
+  "paris",
+  "path-clean",
+  "rand 0.9.0",
+@@ -2646,9 +2647,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "once_cell"
+-version = "1.20.2"
++version = "1.20.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1261fe7e33c73b354eab43b1273a57c8f967d0391e80353e51f764ac02cf6775"
++checksum = "945462a4b81e43c4e3ba96bd7b49d834c6f61198356aa858733bc4acf3cbe62e"
+ 
+ [[package]]
+ name = "paris"
+diff --git a/engine/Cargo.toml b/engine/Cargo.toml
+index 68f3c384..27b674f3 100644
+--- a/engine/Cargo.toml
++++ b/engine/Cargo.toml
+@@ -66,6 +66,7 @@ zeromq = { version = "0.4", default-features = false, features = [
+     "tcp-transport",
+ ] }
+ derive_more = { version = "2.0.1", features = ["is_variant", "display"] }
++once_cell = "1.20.3"
+ 
+ [build-dependencies]
+ static-files = "0.2"
+diff --git a/engine/src/file/local.rs b/engine/src/file/local.rs
+index 0ae2a6cd..a9073166 100644
+--- a/engine/src/file/local.rs
++++ b/engine/src/file/local.rs
+@@ -1,3 +1,69 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 1 é o arquivo '/engine/src/file/local.rs'
++// Informações adicionais:
++// - Tamanho: 16434 bytes
++// - Número de linhas sem o cabeçalho: 492
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Tue Feb 11 12:43:28 2025 +0100
++// - Possível propósito: API/Web, Iterador, Processamento de mídia
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - pub struct LocalStorage {
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Funções de inicialização:
++// - pub async fn new(root: PathBuf, extensions: Vec<String>) -> Self {
++//
++// Outras funções:
++// - fn drop(&mut self) {
++// - async fn browser(&self, path_obj: &PathObject) -> Result<PathObject, ServiceError> {
++// - async fn mkdir(&self, path_obj: &PathObject) -> Result<(), ServiceError> {
++// - async fn rename(&self, move_object: &MoveObject) -> Result<MoveObject, ServiceError> {
++// - async fn remove(&self, source_path: &str, recursive: bool) -> Result<(), ServiceError> {
++// - async fn upload(
++// - async fn watchman(
++// - async fn stop_watch(&mut self) {
++// - async fn fill_filler_list(
++// - async fn copy_assets(&self) -> Result<(), std::io::Error> {
++// - fn is_dir<P: AsRef<Path>>(&self, input: P) -> bool {
++// - fn is_file<P: AsRef<Path>>(&self, input: P) -> bool {
++// - async fn rename_only(source: &PathBuf, target: &PathBuf) -> Result<MoveObject, ServiceError> {
++// - async fn copy_and_delete(source: &PathBuf, target: &PathBuf) -> Result<MoveObject, ServiceError> {
++//
++// Dependências (imports completos):
++// - use std::{
++//   path::{Path, PathBuf},
++//   sync::{atomic::AtomicBool, Arc},
++//   };
++// - #[cfg(target_family = "unix")]
++//   use std::os::unix::fs::MetadataExt;
++// - use actix_multipart::Multipart;
++// - use async_walkdir::WalkDir;
++// - // use futures_util::TryStreamExt as _;
++// - use lexical_sort::{natural_lexical_cmp, PathSort};
++// - use log::*;
++// - use rand::{distr::Alphanumeric, rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
++// - use tokio::{fs, io::AsyncWriteExt, sync::Mutex, task::JoinHandle};
++// - use tokio_stream::StreamExt;
++// - use crate::file::{norm_abs_path, watcher::watch, MoveObject, PathObject, Storage, VideoFile};
++// - use crate::player::utils::{file_extension, include_file_extension, probe::MediaProbe, Media};
++// - use crate::utils::{config::PlayoutConfig, errors::ServiceError, logging::Target};
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::{
+     path::{Path, PathBuf},
+     sync::{atomic::AtomicBool, Arc},
+@@ -324,7 +390,7 @@ impl Storage for LocalStorage {
+ 
+             while let Some(Ok(entry)) = entries.next().await {
+                 if entry.path().is_file() && include_file_extension(config, &entry.path()) {
+-                    let mut media = Media::new(index, &entry.path().to_string_lossy(), false).await;
++                    let mut media = Media::new(index, &entry.path().to_string_lossy(), false, None).await;
+ 
+                     if fillers.is_none() {
+                         if let Err(e) = media.add_probe(false).await {
+@@ -354,7 +420,7 @@ impl Storage for LocalStorage {
+             }
+         } else if filler_path.is_file() {
+             let mut media =
+-                Media::new(0, &config.storage.filler_path.to_string_lossy(), false).await;
++                Media::new(0, &config.storage.filler_path.to_string_lossy(), false, None).await;
+ 
+             if fillers.is_none() {
+                 if let Err(e) = media.add_probe(false).await {
+diff --git a/engine/src/file/watcher.rs b/engine/src/file/watcher.rs
+index 726acb92..9ca9554c 100644
+--- a/engine/src/file/watcher.rs
++++ b/engine/src/file/watcher.rs
+@@ -1,3 +1,55 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 9 é o arquivo '/engine/src/file/watcher.rs'
++// Informações adicionais:
++// - Tamanho: 5157 bytes
++// - Número de linhas sem o cabeçalho: 118
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Tue Jan 28 17:03:40 2025 +0100
++// - Possível propósito: Processamento de mídia
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - Nenhuma struct definido neste arquivo
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Outras funções:
++// - pub async fn watch(
++//
++// Dependências (imports completos):
++// - use std::{
++//   path::Path,
++//   sync::{
++//   atomic::{AtomicBool, Ordering},
++//   mpsc::channel,
++//   Arc,
++//   },
++//   time::Duration,
++//   };
++// - use log::*;
++// - use notify::{
++//   event::{CreateKind, ModifyKind, RemoveKind, RenameMode},
++//   EventKind::{Create, Modify, Remove},
++//   RecursiveMode,
++//   };
++// - use notify_debouncer_full::new_debouncer;
++// - use tokio::sync::Mutex;
++// - use crate::player::utils::{include_file_extension, Media};
++// - use crate::utils::{config::PlayoutConfig, logging::Target};
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::{
+     path::Path,
+     sync::{
+@@ -58,7 +110,7 @@ pub async fn watch(
+                                 if new_path.is_file() && include_file_extension(&config, new_path) {
+                                     let index = sources.lock().await.len();
+                                     let media =
+-                                        Media::new(index, &new_path.to_string_lossy(), false).await;
++                                        Media::new(index, &new_path.to_string_lossy(), false, None).await;
+ 
+                                     sources.lock().await.push(media);
+                                     info!(target: Target::file_mail(), channel = id; "Create new file: <b><magenta>{new_path:?}</></b>");
+@@ -88,13 +140,13 @@ pub async fn watch(
+                                     .position(|x| *x.source == old_path.display().to_string())
+                                 {
+                                     let media =
+-                                        Media::new(index, &new_path.to_string_lossy(), false).await;
++                                        Media::new(index, &new_path.to_string_lossy(), false, None).await;
+                                     media_list[index] = media;
+                                     info!(target: Target::file_mail(), channel = id; "Move file: <b><magenta>{old_path:?}</></b> to <b><magenta>{new_path:?}</></b>");
+                                 } else if include_file_extension(&config, new_path) {
+                                     let index = media_list.len();
+                                     let media =
+-                                        Media::new(index, &new_path.to_string_lossy(), false).await;
++                                        Media::new(index, &new_path.to_string_lossy(), false, None).await;
+ 
+                                     media_list.push(media);
+                                     info!(target: Target::file_mail(), channel = id; "Create new file: <b><magenta>{new_path:?}</></b>");
+diff --git a/engine/src/main.rs b/engine/src/main.rs
+index b0875de1..fbad3632 100644
+--- a/engine/src/main.rs
++++ b/engine/src/main.rs
+@@ -1,3 +1,71 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 5 é o arquivo '/engine/src/main.rs'
++// Informações adicionais:
++// - Tamanho: 10217 bytes
++// - Número de linhas sem o cabeçalho: 277
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Tue Feb 11 12:43:28 2025 +0100
++// - Possível propósito: Acesso a dados, API/Web, Ponto de entrada, Processamento de mídia
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - Nenhuma struct definido neste arquivo
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Outras funções:
++// - fn thread_counter() -> usize {
++// - async fn main() -> Result<(), ProcessError> {
++//
++// Dependências (imports completos):
++// - use std::{
++//   collections::HashSet,
++//   sync::{atomic::AtomicBool, Arc},
++//   thread,
++//   };
++// - use actix_web::{middleware::Logger, web, App, HttpServer};
++// - use actix_web_httpauth::middleware::HttpAuthentication;
++// - #[cfg(any(debug_assertions, not(feature = "embed_frontend")))]
++//   use actix_files::Files;
++// - #[cfg(all(not(debug_assertions), feature = "embed_frontend"))]
++//   use actix_web_static_files::ResourceFiles;
++// - use log::*;
++// - use tokio::{fs::File, io::AsyncReadExt, sync::Mutex};
++// - use ffplayout::{
++//   api::routes::*,
++//   db::{db_drop, db_pool, handles, init_globales},
++//   player::{
++//   controller::{ChannelController, ChannelManager},
++//   utils::{get_date, is_remote, json_validate::validate_playlist, JsonPlaylist},
++//   },
++//   sse::{broadcast::Broadcaster, routes::*, SseAuthState},
++//   utils::{
++//   args_parse::init_args,
++//   config::get_config,
++//   errors::ProcessError,
++//   logging::init_logging,
++//   mail::{self, MailQueue},
++//   playlist::generate_playlist,
++//   time_machine::set_mock_time,
++//   },
++//   validator, ARGS,
++//   };
++// - #[cfg(any(debug_assertions, not(feature = "embed_frontend")))]
++//   use ffplayout::utils::public_path;
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::{
+     collections::HashSet,
+     sync::{atomic::AtomicBool, Arc},
+@@ -248,7 +316,7 @@ async fn main() -> Result<(), ProcessError> {
+                     config,
+                     Arc::new(Mutex::new(Vec::new())),
+                     playlist,
+-                    Arc::new(AtomicBool::new(false)),
++                    Arc::new(AtomicBool::new(false)), manager.incompatible_files.clone()
+                 )
+                 .await;
+             } else if ARGS.test_mail {
+diff --git a/engine/src/player/controller.rs b/engine/src/player/controller.rs
+index 3039bd71..d6ef9231 100644
+--- a/engine/src/player/controller.rs
++++ b/engine/src/player/controller.rs
+@@ -1,3 +1,110 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 7 é o arquivo '/engine/src/player/controller.rs'
++// Informações adicionais:
++// - Tamanho: 14906 bytes
++// - Número de linhas sem o cabeçalho: 458
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Tue Feb 11 12:43:28 2025 +0100
++// - Possível propósito: Configuração, Acesso a dados, Iterador, Processamento de mídia
++//
++// Documentação da struct:
++// Defined process units.
++// #[derive(Clone, Debug, Default, Copy, Eq, Serialize, Deserialize, PartialEq)]
++// pub enum ProcessUnit {
++// #[default]
++// Decoder,
++// Encoder,
++// Ingest,
++// }
++// impl fmt::Display for ProcessUnit {
++// fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++// match *self {
++// Self::Decoder => write!(f, "Decoder"),
++// Self::Encoder => write!(f, "Encoder"),
++// Self::Ingest => write!(f, "Ingest"),
++// }
++// }
++// }
++// use ProcessUnit::*;
++// #[derive(Clone, Debug)]
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - pub struct ChannelManager {
++// - pub struct ChannelController {
++//
++// Enumerações (enums):
++// - pub enum ProcessUnit {
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Funções de inicialização:
++// - pub async fn new(db_pool: Pool<Sqlite>, channel: Channel, config: PlayoutConfig) -> Self {
++// - pub fn new() -> Self {
++//
++// Outras funções:
++// - fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++// - pub async fn update_channel(self, other: &Channel) {
++// - pub async fn update_config(&self, new_config: PlayoutConfig) {
++// - pub async fn start(&self) -> Result<(), ServiceError> {
++// - pub async fn foreground_start(&self, index: usize) -> Result<(), ServiceError> {
++// - pub async fn stop(&self, unit: ProcessUnit) {
++// - pub async fn wait(&self, unit: ProcessUnit) {
++// - pub async fn stop_all(&self, permanent: bool) {
++// - pub fn add(&mut self, manager: ChannelManager) {
++// - pub async fn get(&self, id: i32) -> Option<ChannelManager> {
++// - pub async fn remove(&mut self, channel_id: i32) {
++// - pub fn run_count(&self) -> usize {
++// - async fn run_channel(manager: ChannelManager) -> Result<(), ServiceError> {
++// - pub async fn drain_hls_path(path: &Path) -> io::Result<()> {
++// - async fn find_m3u8_files(path: &Path) -> io::Result<Vec<String>> {
++// - async fn delete_old_segments<P: AsRef<Path> + Clone + std::fmt::Debug>(
++//
++// Dependências (imports completos):
++// - use std::{
++//   cmp, fmt,
++//   path::Path,
++//   sync::{
++//   atomic::{AtomicBool, AtomicUsize, Ordering},
++//   Arc,
++//   },
++//   };
++// - use async_walkdir::WalkDir;
++// - use log::*;
++// - use m3u8_rs::Playlist;
++// - use serde::{Deserialize, Serialize};
++// - use sqlx::{Pool, Sqlite};
++// - use tokio::{
++//   fs,
++//   io::{self, AsyncReadExt},
++//   process::{Child, ChildStdout},
++//   sync::Mutex,
++//   time::{sleep, Duration, Instant},
++//   };
++// - use tokio_stream::StreamExt;
++// - use crate::utils::{config::PlayoutConfig, errors::ServiceError};
++// - use crate::ARGS;
++// - use crate::{
++//   db::{handles, models::Channel},
++//   utils::logging::Target,
++//   };
++// - use crate::{
++//   file::{init_storage, select_storage_type, StorageBackend},
++//   player::{output::player, utils::Media},
++//   };
++// - use std::collections::HashSet;
++// - use ProcessUnit::*;
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::{
+     cmp, fmt,
+     path::Path,
+@@ -31,6 +138,7 @@ use crate::{
+     file::{init_storage, select_storage_type, StorageBackend},
+     player::{output::player, utils::Media},
+ };
++use std::collections::HashSet;
+ 
+ const VERSION: &str = env!("CARGO_PKG_VERSION");
+ 
+@@ -77,6 +185,8 @@ pub struct ChannelManager {
+     pub current_index: Arc<AtomicUsize>,
+     pub filler_index: Arc<AtomicUsize>,
+     pub storage: Arc<Mutex<StorageBackend>>,
++    pub incompatible_files: Arc<Mutex<HashSet<String>>>,
++    pub ignore_time_drift: Arc<AtomicBool>,
+ }
+ 
+ impl ChannelManager {
+@@ -116,6 +226,8 @@ impl ChannelManager {
+             filter_chain: None,
+             current_date: Arc::new(Mutex::new(String::new())),
+             storage,
++            incompatible_files: Arc::new(Mutex::new(HashSet::new())),
++            ignore_time_drift: Arc::new(AtomicBool::new(false)),
+         }
+     }
+ 
+@@ -388,7 +500,11 @@ async fn run_channel(manager: ChannelManager) -> Result<(), ServiceError> {
+             .await;
+     }
+ 
+-    player(manager).await
++
++    let _ = player(manager).await;
++
++    Ok(())
++
+ }
+ 
+ pub async fn drain_hls_path(path: &Path) -> io::Result<()> {
+diff --git a/engine/src/player/input/folder.rs b/engine/src/player/input/folder.rs
+index 61e51ca2..578861ef 100644
+--- a/engine/src/player/input/folder.rs
++++ b/engine/src/player/input/folder.rs
+@@ -1,3 +1,60 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 2 é o arquivo '/engine/src/player/input/folder.rs'
++// Informações adicionais:
++// - Tamanho: 5335 bytes
++// - Número de linhas sem o cabeçalho: 165
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Wed Feb 5 21:30:00 2025 +0100
++// - Possível propósito: Configuração, Iterador, Processamento de mídia
++//
++// Documentação da struct:
++// Folder Sources
++// 
++// Like playlist source, we create here a folder list for iterate over it.
++// #[derive(Debug, Clone)]
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - pub struct FolderSource {
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Funções de inicialização:
++// - pub async fn new(config: &PlayoutConfig, manager: ChannelManager) -> Self {
++//
++// Funções de iteração/controle:
++// - pub async fn next(&mut self) -> Option<Media> {
++//
++// Outras funções:
++// - pub async fn from_list(manager: &ChannelManager, list: Vec<Media>) -> Self {
++// - async fn shuffle(&mut self) {
++// - async fn sort(&mut self) {
++//
++// Dependências (imports completos):
++// - use std::sync::atomic::Ordering;
++// - use async_walkdir::WalkDir;
++// - use log::*;
++// - use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
++// - use tokio_stream::StreamExt;
++// - use crate::player::{
++//   controller::ChannelManager,
++//   utils::{include_file_extension, time_in_seconds, Media},
++//   };
++// - use crate::utils::{config::PlayoutConfig, logging::Target};
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::sync::atomic::Ordering;
+ 
+ use async_walkdir::WalkDir;
+@@ -49,7 +106,7 @@ impl FolderSource {
+ 
+             while let Some(Ok(entry)) = entries.next().await {
+                 if entry.path().is_file() && include_file_extension(config, &entry.path()) {
+-                    let media = Media::new(0, &entry.path().to_string_lossy(), false).await;
++                    let media = Media::new(0, &entry.path().to_string_lossy(), false, Some(manager.clone().into())).await;
+                     media_list.push(media);
+                 }
+             }
+diff --git a/engine/src/player/input/ingest.rs b/engine/src/player/input/ingest.rs
+index f257e2e3..76d63c78 100644
+--- a/engine/src/player/input/ingest.rs
++++ b/engine/src/player/input/ingest.rs
+@@ -1,3 +1,55 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 18 é o arquivo '/engine/src/player/input/ingest.rs'
++// Informações adicionais:
++// - Tamanho: 5171 bytes
++// - Número de linhas sem o cabeçalho: 163
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Mon Feb 17 17:30:05 2025 +0100
++// - Possível propósito: Processamento de mídia
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - Nenhuma struct definido neste arquivo
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Outras funções:
++// - async fn server_monitor(
++// - pub async fn ingest_server(
++//
++// Dependências (imports completos):
++// - use std::{process::Stdio, sync::atomic::Ordering};
++// - use log::*;
++// - use tokio::{
++//   io::{AsyncBufReadExt, BufReader},
++//   process::{ChildStderr, Command},
++//   };
++// - use crate::utils::{
++//   config::{PlayoutConfig, FFMPEG_IGNORE_ERRORS, FFMPEG_UNRECOVERABLE_ERRORS},
++//   logging::{log_line, Target},
++//   };
++// - use crate::vec_strings;
++// - use crate::{
++//   player::{
++//   controller::{ChannelManager, ProcessUnit::*},
++//   utils::{is_free_tcp_port, valid_stream, Media},
++//   },
++//   utils::{errors::ServiceError, logging::fmt_cmd},
++//   };
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::{process::Stdio, sync::atomic::Ordering};
+ 
+ use log::*;
+@@ -74,7 +126,7 @@ pub async fn ingest_server(
+     let id = config.general.channel_id;
+     let mut server_cmd = vec_strings!["-hide_banner", "-nostats", "-v", "level+info"];
+     let stream_input = config.ingest.input_cmd.clone().unwrap();
+-    let mut dummy_media = Media::new(0, "Live Stream", false).await;
++    let mut dummy_media = Media::new(0, "Live Stream", false, Some(manager.clone().into())).await;
+     dummy_media.unit = Ingest;
+     dummy_media.add_filter(&config, &None).await;
+     let is_alive = manager.is_alive.clone();
+diff --git a/engine/src/player/input/playlist.rs b/engine/src/player/input/playlist.rs
+index c74b9d24..8d29cfc7 100644
+--- a/engine/src/player/input/playlist.rs
++++ b/engine/src/player/input/playlist.rs
+@@ -1,3 +1,88 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 10 é o arquivo '/engine/src/player/input/playlist.rs'
++// Informações adicionais:
++// - Tamanho: 39911 bytes
++// - Número de linhas sem o cabeçalho: 984
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Tue Feb 11 12:43:28 2025 +0100
++// - Possível propósito: Acesso a dados, Iterador, Processamento de mídia
++//
++// Documentação da struct:
++// Struct for current playlist.
++// 
++// Here we prepare the init clip and build a iterator where we pull our clips.
++// #[derive(Debug)]
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - pub struct CurrentProgram {
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Funções de inicialização:
++// - pub async fn new(manager: ChannelManager) -> Self {
++// - async fn get_current_clip(&mut self) {
++// - async fn init_clip(&mut self) -> bool {
++//
++// Funções de gerenciamento de tempo:
++// - async fn set_status(&mut self, date: &Option<String>, shift: f64) {
++// - fn get_current_time(&mut self) -> f64 {
++// - async fn recalculate_begin(&mut self, extend: bool) {
++//
++// Funções de gerenciamento de mídia:
++// - async fn fill_end(&mut self, total_delta: f64) {
++// - pub async fn gen_source(&mut self, mut node: Media, last_index: usize) {
++// - async fn duplicate_for_seek_and_loop(&mut self, node: &mut Media) {
++//
++// Funções de iteração/controle:
++// - async fn load_or_update_playlist(&mut self, seek: bool) {
++// - async fn check_for_playlist(&mut self, seek: bool) -> bool {
++// - pub async fn next(&mut self) -> Option<Media> {
++//
++// Outras funções:
++// - async fn last_next_ad(&mut self, node: &mut Media) {
++// - async fn handle_list_init(&mut self, mut node: Media, last_index: usize) {
++// - async fn handle_list_end(&mut self, mut node: Media, total_delta: f64, last_index: usize) {
++// - async fn timed_source(&mut self, mut node: Media, last: bool, last_index: usize) {
++//
++// Dependências (imports completos):
++// - use std::{
++//   path::Path,
++//   sync::{
++//   atomic::{AtomicBool, Ordering},
++//   Arc,
++//   },
++//   };
++// - use log::*;
++// - use crate::db::handles;
++// - use crate::player::{
++//   controller::ChannelManager,
++//   utils::{
++//   gen_dummy, get_delta, is_close, is_remote,
++//   json_serializer::{read_json, set_defaults},
++//   loop_filler, loop_image, modified_time,
++//   probe::MediaProbe,
++//   seek_and_length, time_in_seconds, JsonPlaylist, Media,
++//   },
++//   };
++// - use crate::utils::{
++//   config::{PlayoutConfig, IMAGE_FORMAT},
++//   logging::Target,
++//   };
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::{
+     path::Path,
+     sync::{
+@@ -22,8 +107,17 @@ use crate::player::{
+ use crate::utils::{
+     config::{PlayoutConfig, IMAGE_FORMAT},
+     logging::Target,
++    recovery::{
++        enter_recovery_mode,
++        exit_recovery_mode, 
++        is_in_recovery_mode,
++        mark_file_incompatible,
++        is_file_incompatible,
++        clear_incompatible_files
++    },
+ };
+ 
++
+ /// Struct for current playlist.
+ ///
+ /// Here we prepare the init clip and build a iterator where we pull our clips.
+@@ -91,6 +185,7 @@ impl CurrentProgram {
+                 self.is_alive.clone(),
+                 seek,
+                 false,
++                Some(self.manager.clone()),
+             )
+             .await;
+ 
+@@ -184,6 +279,7 @@ impl CurrentProgram {
+                 self.is_alive.clone(),
+                 false,
+                 true,
++                Some(self.manager.clone()),
+             )
+             .await;
+ 
+@@ -251,14 +347,24 @@ impl CurrentProgram {
+ 
+     // Get current time and when we are before start time,
+     // we add full seconds of a day to it.
+-    fn get_current_time(&mut self) -> f64 {
++    fn get_current_time(&mut self) -> Option<f64> {
++        
++        // Verificar se estamos em modo de recuperação
++        if is_in_recovery_mode() {
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++                "Em modo de recuperação: ignorando cálculo de tempo atual");
++            return None;
++        }
++        
++        // Processamento normal do tempo
+         let mut time_sec = time_in_seconds(&self.config.channel.timezone);
+-
++    
+         if time_sec < self.start_sec {
+             time_sec += 86400.0; // self.config.playlist.length_sec.unwrap();
+         }
+-
+-        time_sec
++    
++        // Retornar o tempo calculado como Some
++        Some(time_sec)
+     }
+ 
+     // On init or reload we need to seek for the current clip.
+@@ -297,9 +403,32 @@ impl CurrentProgram {
+         if !self.manager.list_init.load(Ordering::SeqCst) {
+             let time_sec = self.get_current_time();
+             let index = self.manager.current_index.load(Ordering::SeqCst);
++
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++            "[init_clip] Processando index: {} no tempo: {}", index, time_sec);
++
+             let nodes = self.manager.current_list.lock().await;
+             let last_index = nodes.len() - 1;
+ 
++            //Verificação de incompatibilidade detalhada
++            let is_incompatible = if index < nodes.len() {
++                let incompatible_files = self.manager.incompatible_files.lock().await;
++                let source = &nodes[index].source;
++                let result = incompatible_files.contains(source);
++                
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[init_clip] Arquivo no index {} é incompatível? {} - {}", 
++                    index, result, source);
++                
++                result
++            } else {
++                // Log se o índice estiver fora dos limites
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[init_clip] Index {} fora dos limites da lista (tamanho: {})", 
++                    index, nodes.len());
++                false
++            };
++
+             // de-instance node to preserve original values in list
+             let mut node_clone = nodes[index].clone();
+ 
+@@ -308,23 +437,69 @@ impl CurrentProgram {
+ 
+             trace!("Clip from init: {}", node_clone.source);
+ 
++            if is_incompatible {
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[init_clip] Substituindo arquivo incompatível: {} por filler", 
++                    node_clone.source);
++                    
++                //self.manager.current_index.fetch_add(1, Ordering::SeqCst);
++                
++                // Criar filler mantendo todas as propriedades temporais do original
++                // Usar diretamente o caminho do filler em vez de string vazia
++                let filler_path = self.config.storage.filler_path.to_string_lossy().to_string();
++                let mut media = Media::new(index, &filler_path, false, Some(self.manager.clone().into())).await;
++                            
++                // Copiar EXATAMENTE todos os atributos temporais
++                media.probe = None;
++                media.begin = node_clone.begin;
++                media.seek = node_clone.seek;
++                media.out = node_clone.out;
++                media.duration = node_clone.duration;
++                //media.index = node_clone.index; // Garantir que o índice também seja copiado
++
++                // Adicionar este log para rastrear melhor os valores de tempo
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[init_clip] Atributos temporais do original: begin={}, seek={}, duration={}, out={}",
++                    node_clone.begin.unwrap_or_default(), node_clone.seek, node_clone.duration, node_clone.out);
++                
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[init_clip] Criando filler com duração exata de {} segundos e begin: {}", 
++                    media.out - media.seek, media.begin.unwrap_or_default());
++                
++                // Garantir que list_init permaneça false
++                //self.manager.list_init.store(false, Ordering::SeqCst);
++                
++                let last_index = self.manager.current_list.lock().await.len() - 1;
++                self.gen_source(media, last_index).await;
++                
++                return true;
++            }
++
+             node_clone.seek += time_sec
+                 - (node_clone.begin.unwrap() - self.manager.channel.lock().await.time_shift);
+ 
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++            "[init_clip] Seek ajustado para: {}", node_clone.seek);
++
+             self.last_next_ad(&mut node_clone).await;
+ 
+             self.manager.current_index.fetch_add(1, Ordering::SeqCst);
+ 
+             self.handle_list_init(node_clone, last_index).await;
+ 
+-            if self
+-                .current_node
+-                .source
+-                .contains(&self.config.channel.storage.to_string_lossy().to_string())
+-                || self.current_node.source.contains("color=c=#121212")
++        // Em vez da condição atual, usar algo como:
++        if self.current_node.source.is_empty() && self.current_node.duration > 0.0  // Filler de substituição
++            || self.current_node.source.contains("color=c=#121212")  // Filler de cor
++            || self.current_node.source == self.config.storage.filler_path.to_string_lossy()  // Filler específico
++            || self.current_node.source.contains("/filler/") // Diretório de fillers
+             {
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                "[init_clip] Detectado filler: {}", self.current_node.source);
+                 is_filler = true;
+             }
++        }  else {
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++                "[init_clip] list_init está true, pulando verificação de incompatibilidade");
+         }
+ 
+         is_filler
+@@ -333,7 +508,7 @@ impl CurrentProgram {
+     async fn fill_end(&mut self, total_delta: f64) {
+         // Fill end from playlist
+         let index = self.manager.current_index.load(Ordering::SeqCst);
+-        let mut media = Media::new(index, "", false).await;
++        let mut media = Media::new(index, "", false, Some(self.manager.clone().into())).await;
+         media.begin = Some(time_in_seconds(&self.config.channel.timezone));
+         media.duration = total_delta;
+         media.out = total_delta;
+@@ -431,14 +606,28 @@ impl CurrentProgram {
+     ///
+     /// - check begin and length from clip
+     /// - return clip only if we are in 24 hours time range
+-    async fn timed_source(&mut self, mut node: Media, last: bool, last_index: usize) {
++    async fn timed_source(&mut self, mut node: Media, last: bool, last_index: usize) -> Option<()> {
++        // Importar is_in_recovery_mode
++        use crate::utils::recovery::is_in_recovery_mode;
++        
++        // Verificar no início se estamos em modo de recuperação
++        if is_in_recovery_mode() {
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++                "Em modo de recuperação: ignorando verificações temporais para: {}", 
++                node.source);
++            
++            // Processar o nó e retornar None para indicar que estamos em modo de recuperação
++            self.gen_source(node, last_index).await;
++            return None;
++        }
++        
++        // O restante da função permanece igual, apenas alterando os retornos
+         let time_shift = self.manager.channel.lock().await.time_shift;
+         let current_date = self.manager.current_date.lock().await.clone();
+         let last_date = self.manager.channel.lock().await.last_date.clone();
+         let (delta, total_delta) = get_delta(&self.config, &node.begin.unwrap());
+         let mut shifted_delta = delta;
+         let mut shifted_msg = String::new();
+-
+         trace!(
+             "Node - begin: {} | source: {}",
+             node.begin.unwrap(),
+@@ -460,8 +649,6 @@ impl CurrentProgram {
+                 && shifted_delta.abs() > self.config.general.stop_threshold
+             {
+                 // Handle summer/winter time changes.
+-                // It only checks if the time change is one hour backwards or forwards.
+-                // Production usage must be shown if this is sufficient, or if a real change needs to be verified.
+                 if is_close(
+                     shifted_delta.abs(),
+                     3600.0,
+@@ -477,9 +664,8 @@ impl CurrentProgram {
+                     error!(target: Target::file_mail(), channel = self.channel_id; "Clip begin out of sync for <yellow>{delta:.3}</> seconds.");
+ 
+                     node.cmd = None;
+-
+                     self.current_node = node;
+-                    return;
++                    return Some(()); // Modificado para retornar Some(())
+                 }
+             }
+         }
+@@ -491,39 +677,39 @@ impl CurrentProgram {
+         {
+             // when we are in the 24 hour range, get the clip
+             self.gen_source(node, last_index).await;
+-
+-            return;
++            return Some(()); // Modificado para retornar Some(())
+         } else if total_delta <= 0.0 {
+             info!(target: Target::file_mail(), channel = self.channel_id; "Begin is over play time, skip: {}", node.source);
+         } else if total_delta < node.duration - node.seek || last {
+             self.handle_list_end(node, total_delta, last_index).await;
+-
+-            return;
++            return Some(()); // Modificado para retornar Some(())
+         }
+ 
+         node.skip = true;
+         self.current_node = node;
++        
++        Some(()) // Retorno ao final da função
+     }
+ 
+     /// Generate the source CMD, or when clip not exist, get a dummy.
+     pub async fn gen_source(&mut self, mut node: Media, last_index: usize) {
+         let node_index = node.index.unwrap_or_default();
+-        let duration = node.out - node.seek;
+-
+-        if node.duration > 0.0 && duration < 1.0 {
++        let original_duration = node.out - node.seek;  // Preservar a duração original desejada
++    
++        if node.duration > 0.0 && original_duration < 1.0 {
+             warn!(
+                 target: Target::file_mail(), channel = self.channel_id;
+-                "Skip clip that is less then one second long (<yellow>{duration:.3}</>)."
++                "Skip clip that is less then one second long (<yellow>{original_duration:.3}</>)."
+             );
+-
++    
+             // INFO:
+             // This part has been changed twice, the last time in January 2024.
+             // Better case is that it skips the short clip, especially when reloading a playlist,
+             // it prevents the last clip from playing again for 1.2 seconds.
+             // But the behavior needs to be observed for a longer time to be sure that it has no side effects.
+-
++    
+             // duration = 1.2;
+-
++    
+             // if node.seek > 1.0 {
+             //     node.seek -= 1.2;
+             // } else {
+@@ -531,15 +717,15 @@ impl CurrentProgram {
+             // }
+             node.skip = true;
+         }
+-
+-        trace!("Clip length: {duration}, duration: {}", node.duration);
+-
++    
++        trace!("Clip length: {original_duration}, duration: {}", node.duration);
++    
+         if node.probe.is_none() && !node.source.is_empty() {
+             if let Err(e) = node.add_probe(true).await {
+                 trace!("{e:?}");
+             };
+         }
+-
++    
+         // separate if condition, because of node.add_probe() in last condition
+         if node.probe.is_some() {
+             if node
+@@ -555,59 +741,73 @@ impl CurrentProgram {
+                     warn!(target: Target::file_mail(), channel = self.channel_id; "Clip loops and has seek value: duplicate clip to separate loop and seek.");
+                     self.duplicate_for_seek_and_loop(&mut node).await;
+                 }
+-
++    
+                 node.cmd = Some(seek_and_length(&self.config, &mut node));
+             }
+         } else {
+             trace!("clip index: {node_index} | last index: {last_index}");
+-
++    
+             // Last index is the index from the last item from the node list.
+             if node_index < last_index {
+                 error!(target: Target::file_mail(), channel = self.channel_id; "Source not found: <b><magenta>{}</></b>", node.source);
+             }
+-
++    
+             let fillers = self.manager.filler_list.lock().await;
+-
+-            // Set list_init to true, to stay in sync.
+-            self.manager.list_init.store(true, Ordering::SeqCst);
+-
+-            if self
+-                .manager
+-                .storage
+-                .lock()
+-                .await
+-                .is_dir(&self.config.storage.filler_path)
+-                && !fillers.is_empty()
+-            {
++            
++            // Verificar se é uma substituição de arquivo incompatível
++            let is_incompatible_replacement = node.source.is_empty() && original_duration > 0.0;
++            
++            // Definir list_init apenas se não for substituição de arquivo incompatível
++            if !is_incompatible_replacement {
++                // Set list_init to true, to stay in sync.
++                //self.manager.list_init.store(true, Ordering::SeqCst);
++            } else {
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[gen_source] Mantendo list_init como false para substituição de arquivo incompatível");
++            }
++    
++            if self.config.storage.filler_path.is_dir() && !fillers.is_empty() {
+                 let mut index = self.manager.filler_index.fetch_add(1, Ordering::SeqCst);
+-
++    
+                 if index > fillers.len() - 1 {
+                     index = 0;
+                 }
+-
++    
+                 let mut filler_media = fillers[index].clone();
+-
++                
++                // Log para diagnóstico
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[gen_source] Filler selecionado - source: {}, duration: {}, duração necessária: {}", 
++                    filler_media.source, filler_media.duration, original_duration);
++    
+                 trace!("take filler: {}", filler_media.source);
+-
++    
+                 if index == fillers.len() - 1 {
+                     // reset index for next round
+                     self.manager.filler_index.store(0, Ordering::SeqCst);
+                 }
+-
++    
+                 if filler_media.probe.is_none() {
+                     if let Err(e) = filler_media.add_probe(false).await {
+                         error!(target: Target::file_mail(), channel = self.channel_id; "{e:?}");
+                     };
+                 }
+-
+-                if node.duration > 0.0 && filler_media.duration > duration {
+-                    filler_media.out = duration;
+-                }
+-
++    
++                // CORREÇÃO CRÍTICA: Preservar a duração original ao criar o filler
+                 node.source = filler_media.source;
+                 node.seek = 0.0;
+-                node.out = filler_media.out;
++                
++                // Preservar a duração original no out
++                node.out = original_duration;
++                
++                // Manter a duração real do filler para que o cálculo de loop_count funcione
+                 node.duration = filler_media.duration;
++                
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[gen_source] Configurando filler - duração original: {}, duração do filler: {}, loop necessário: {}",
++                    original_duration, filler_media.duration, 
++                    if filler_media.duration > 0.0 { (original_duration / filler_media.duration).ceil() } else { 1.0 });
++                
+                 node.cmd = Some(loop_filler(&self.config, &node));
+                 node.probe = filler_media.probe;
+             } else {
+@@ -632,13 +832,7 @@ impl CurrentProgram {
+                             node.cmd = Some(loop_image(&self.config, &node));
+                             node.probe = Some(probe);
+                         } else if let Some(filler_duration) = probe.clone().format.duration {
+-                            // Create placeholder from config filler.
+-                            let filler_out = if node.duration == 0.0 {
+-                                filler_duration
+-                            } else {
+-                                filler_duration.min(duration)
+-                            };
+-
++                            // CORREÇÃO: Preservar a duração original aqui também
+                             node.source = self
+                                 .config
+                                 .storage
+@@ -647,13 +841,13 @@ impl CurrentProgram {
+                                 .to_string_lossy()
+                                 .to_string();
+                             node.seek = 0.0;
+-                            node.out = filler_out;
+-                            node.duration = filler_duration;
++                            node.out = original_duration;  // Usar a duração original
++                            node.duration = filler_duration;  // Manter a duração real do filler
+                             node.cmd = Some(loop_filler(&self.config, &node));
+                             node.probe = Some(probe);
+                         } else {
+                             // Create colored placeholder.
+-                            let (source, cmd) = gen_dummy(&self.config, duration);
++                            let (source, cmd) = gen_dummy(&self.config, original_duration);  // Usar duração original
+                             node.source = source;
+                             node.cmd = Some(cmd);
+                         }
+@@ -661,40 +855,38 @@ impl CurrentProgram {
+                     Err(e) => {
+                         // Create colored placeholder.
+                         error!(target: Target::file_mail(), channel = self.channel_id; "Filler error: {e}");
+-
+-                        let mut dummy_duration = 60.0;
+-
+-                        if node.duration > 0.0 && dummy_duration > duration {
+-                            dummy_duration = duration;
+-                        }
+-
+-                        let (source, cmd) = gen_dummy(&self.config, dummy_duration);
++    
++                        // Usar a duração original aqui também
++                        let (source, cmd) = gen_dummy(&self.config, original_duration);
+                         node.seek = 0.0;
+-                        node.out = dummy_duration;
+-                        node.duration = dummy_duration;
++                        node.out = original_duration;
++                        node.duration = original_duration;  // Para placeholders coloridos, a duração é a mesma
+                         node.source = source;
+                         node.cmd = Some(cmd);
+                     }
+                 }
+             }
+-
++    
+             warn!(
+                 target: Target::file_mail(), channel = self.channel_id;
+-                "Generate filler with <yellow>{:.2}</> seconds length!",
+-                node.out
++                "Generate filler with <yellow>{:.2}</> seconds length! Duração original: <yellow>{:.2}</>, Loop configurado: {}",
++                node.out,
++                original_duration,
++                node.cmd.as_ref().map_or(false, |cmd| cmd.join(" ").contains("-stream_loop"))
+             );
+         }
+-
++    
+         node.add_filter(&self.config, &self.manager.filter_chain.clone())
+             .await;
+-
++    
+         trace!(
+-            "return gen_source: {}, seek: {}, out: {}",
++            "return gen_source: {}, seek: {}, out: {}, duration: {}",
+             node.source,
+             node.seek,
+             node.out,
++            node.duration
+         );
+-
++    
+         self.current_node = node;
+     }
+ 
+@@ -765,7 +957,7 @@ impl CurrentProgram {
+                     last_index = length - 1;
+                 }
+ 
+-                let mut media = Media::new(length, "", false).await;
++                let mut media = Media::new(length, "", false, Some(self.manager.clone().into())).await;
+                 media.begin = Some(current_time);
+                 media.duration = total_delta;
+                 media.out = total_delta;
+@@ -778,17 +970,78 @@ impl CurrentProgram {
+             < self.manager.current_list.lock().await.len()
+         {
+             // get next clip from current playlist
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++            "[next] Branch normal de processamento de arquivo");
+ 
+             let mut is_last = false;
+             let index = self.manager.current_index.load(Ordering::SeqCst);
++
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++            "[next] Processando index: {}", index);
++
+             let node_list = self.manager.current_list.lock().await;
++
++            // Verificação de incompatibilidade com logs...
++            // let is_incompatible = if index < node_list.len() {
++            //     let source = node_list[index].source.clone();
++            //     let incompatible_files = self.manager.incompatible_files.lock().await;
++            //     let result = incompatible_files.contains(&source);
++                
++            //     debug!(target: Target::file_mail(), channel = self.channel_id;
++            //         "[next] Arquivo no index {} é incompatível? {} - {}", 
++            //         index, result, source);
++                    
++            //     result
++            // } else {
++            //     // Log se o índice estiver fora dos limites...
++            //     debug!(target: Target::file_mail(), channel = self.channel_id;
++            //         "[next] Index {} fora dos limites da lista (tamanho: {})", 
++            //         index, node_list.len());
++            //     false
++            // };
++
+             let mut node = node_list[index].clone();
+             let last_index = node_list.len() - 1;
+ 
+             drop(node_list);
+ 
++            // if is_incompatible {
++            //     debug!(target: Target::file_mail(), channel = self.channel_id;
++            //         "[next] Substituindo arquivo incompatível: {} por filler", 
++            //         node.source);
++                
++            //     // REMOVER ESTA LINHA - Não incrementar o índice aqui
++            //     // self.manager.current_index.fetch_add(1, Ordering::SeqCst);
++                
++            //     // Criar filler com EXATAMENTE os mesmos parâmetros temporais
++            //     let mut filler = Media::new(index, "", false, Some(self.manager.clone().into())).await;
++                
++            //     // Manter todos os atributos temporais idênticos
++            //     filler.begin = node.begin;
++            //     filler.seek = node.seek;
++            //     filler.out = node.out;
++            //     filler.duration = node.duration;
++                
++            //     debug!(target: Target::file_mail(), channel = self.channel_id;
++            //         "[next] Criando filler com duração exata de {} segundos e begin: {}", 
++            //         filler.out - filler.seek, filler.begin.unwrap_or_default());
++                
++            //     self.last_next_ad(&mut filler).await;
++            //     self.gen_source(filler, last_index).await;
++                
++            //     // Garantir que list_init permaneça false
++            //     self.manager.list_init.store(false, Ordering::SeqCst);
++                
++            //     // Incrementar o índice normalmente no final da função next()
++            //     self.manager.current_index.fetch_add(1, Ordering::SeqCst);
++                
++            //     return Some(self.current_node.clone());
++            // }
++
+             if index == last_index {
+                 is_last = true;
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                "[next] Processando último arquivo da lista");
+             }
+ 
+             self.last_next_ad(&mut node).await;
+@@ -805,12 +1058,20 @@ impl CurrentProgram {
+                 // Playlist is to early finish,
+                 // and if we have to fill it with a placeholder.
+                 trace!("Total delta on list end: {total_delta}");
++            
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[next] Preenchendo fim da playlist com placeholder, total_delta = {}", 
++                    total_delta);
++
++                trace!("Total delta on list end: {total_delta}");
+ 
+                 self.fill_end(total_delta).await;
+ 
+                 return Some(self.current_node.clone());
+             }
+             // Get first clip from next playlist.
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++            "[next] Obtendo primeiro clip da próxima playlist");
+ 
+             let c_list = self.manager.current_list.lock().await;
+             let mut first_node = c_list[0].clone();
+diff --git a/engine/src/player/output/hls.rs b/engine/src/player/output/hls.rs
+index 477d46ff..c50fd007 100644
+--- a/engine/src/player/output/hls.rs
++++ b/engine/src/player/output/hls.rs
+@@ -1,3 +1,61 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 6 é o arquivo '/engine/src/player/output/hls.rs'
++// Informações adicionais:
++// - Tamanho: 9171 bytes
++// - Número de linhas sem o cabeçalho: 304
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Mon Feb 17 17:30:05 2025 +0100
++// - Possível propósito: Acesso a dados, Iterador, Processamento de mídia
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - Nenhuma struct definido neste arquivo
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Outras funções:
++// - fn insert_readrate(args: &mut Vec<String>, rate: f64) {
++// - async fn ingest_writer(manager: ChannelManager) -> Result<(), ServiceError> {
++// - async fn write(manager: &ChannelManager, ff_log_format: &str) -> Result<(), ServiceError> {
++// - pub async fn writer(manager: &ChannelManager, ff_log_format: &str) -> Result<(), ServiceError> {
++//
++// Dependências (imports completos):
++// - use std::{process::Stdio, sync::atomic::Ordering};
++// - use log::*;
++// - use tokio::{
++//   io::{AsyncBufReadExt, BufReader},
++//   process::Command,
++//   };
++// - use crate::utils::{logging::log_line, task_runner};
++// - use crate::vec_strings;
++// - use crate::{
++//   player::{
++//   controller::{ChannelManager, ProcessUnit::*},
++//   input::source_generator,
++//   utils::{
++//   get_delta, is_free_tcp_port, prepare_output_cmd, sec_to_time, stderr_reader,
++//   valid_stream, Media,
++//   },
++//   },
++//   utils::{
++//   errors::ServiceError,
++//   logging::{fmt_cmd, Target},
++//   },
++//   };
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ /*
+ This module write the files compression directly to a hls (m3u8) playlist,
+ without pre- and post-processing.
+@@ -62,7 +120,7 @@ async fn ingest_writer(manager: ChannelManager) -> Result<(), ServiceError> {
+     let chain = manager.filter_chain.clone();
+     let stream_input = config.ingest.input_cmd.clone().unwrap();
+     let mut server_prefix = vec_strings!["-hide_banner", "-nostats", "-v", "level+info"];
+-    let mut dummy_media = Media::new(0, "Live Stream", false).await;
++    let mut dummy_media = Media::new(0, "Live Stream", false, Some(manager.clone().into())).await;
+ 
+     dummy_media.unit = Ingest;
+     dummy_media.add_filter(&config, &chain).await;
+diff --git a/engine/src/player/output/mod.rs b/engine/src/player/output/mod.rs
+index e16b31af..9de84957 100644
+--- a/engine/src/player/output/mod.rs
++++ b/engine/src/player/output/mod.rs
+@@ -1,3 +1,55 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 8 é o arquivo '/engine/src/player/output/mod.rs'
++// Informações adicionais:
++// - Tamanho: 12392 bytes
++// - Número de linhas sem o cabeçalho: 345
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Wed Jan 29 10:25:15 2025 +0100
++// - Possível propósito: Acesso a dados, Iterador, Processamento de mídia
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - Nenhuma struct definido neste arquivo
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Outras funções:
++// - async fn play(
++// - pub async fn player(manager: ChannelManager) -> Result<(), ServiceError> {
++//
++// Dependências (imports completos):
++// - use std::{process::Stdio, sync::atomic::Ordering};
++// - use log::*;
++// - use tokio::{
++//   io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
++//   process::{ChildStdin, Command},
++//   };
++// - use crate::player::{
++//   controller::{ChannelManager, ProcessUnit::*},
++//   input::{ingest_server, source_generator},
++//   utils::{sec_to_time, stderr_reader},
++//   };
++// - use crate::utils::{
++//   config::OutputMode::*,
++//   errors::ServiceError,
++//   logging::{fmt_cmd, Target},
++//   task_runner,
++//   };
++// - use crate::vec_strings;
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::{process::Stdio, sync::atomic::Ordering};
+ 
+ use log::*;
+@@ -21,6 +73,14 @@ use crate::utils::{
+     errors::ServiceError,
+     logging::{fmt_cmd, Target},
+     task_runner,
++    recovery::{
++        enter_recovery_mode,
++        exit_recovery_mode, 
++        is_in_recovery_mode,
++        mark_file_incompatible,
++        is_file_incompatible,
++        clear_incompatible_files
++    },
+ };
+ use crate::vec_strings;
+ 
+@@ -56,6 +116,29 @@ async fn play(
+             None => break,
+         };
+ 
++        // ADICIONADO: Log para analisar a duração e comando
++        debug!(target: Target::file_mail(), channel = id;
++            "[play] Analisando comando de decoder - duração calculada: {}, duração do arquivo: {}, out: {}, seek: {}, -t no comando: {}, comando contém stream_loop? {}",
++            node.out - node.seek,
++            node.duration,
++            node.out,
++            node.seek,
++            cmd.join(" ").contains(" -t "),
++            cmd.join(" ").contains("-stream_loop")
++        );
++
++        // ADICIONADO: Log para analisar parâmetros exatos de -t
++        if let Some(t_pos) = cmd.iter().position(|arg| arg == "-t") {
++            if t_pos + 1 < cmd.len() {
++                debug!(target: Target::file_mail(), channel = id;
++                    "[play] Valor de -t no comando: {}", cmd[t_pos + 1]);
++            }
++        }
++
++        // ADICIONADO: Log para ver o comando completo
++        debug!(target: Target::file_mail(), channel = id;
++            "[play] Comando completo: {}", cmd.join(" "));
++
+         if node.skip {
+             // skip is different from node.cmd = None.
+             // This source is valid, but too short to play,
+@@ -183,7 +266,66 @@ async fn play(
+         drop(decoder_stdout);
+ 
+         manager.wait(Decoder).await;
+-        error_decoder_task.await??;
++        
++        match error_decoder_task.await {
++            Ok(Ok(())) => {
++                debug!(target: Target::file_mail(), channel = id;
++                    "[play] Decodificação bem-sucedida para: {}", node.source);
++            },
++            Ok(Err(ServiceError::DecodingError(msg))) => {
++                error!(target: Target::file_mail(), channel = id; 
++                "Arquivo incompatível detectado: {}: {}", node.source, msg);
++                
++                // Marcar arquivo como incompatível
++                {
++                    let mut incompatible_files = manager.incompatible_files.lock().await;
++                    if !incompatible_files.contains(&node.source) {
++                        incompatible_files.insert(node.source.clone());
++                        debug!(target: Target::file_mail(), channel = id;
++                            "[play] Adicionado arquivo à lista de incompatíveis: {}", node.source);
++                    }
++                }
++                
++                // Calcular a duração do clipe que não foi reproduzido
++                let clip_duration = node.out - node.seek;
++                
++                // Ajustar o time_shift NEGATIVAMENTE pela duração do clipe
++                // Isso compensará preventivamente o ajuste positivo que acontecerá após o continue
++                {
++                    //let mut channel = manager.channel.lock().await;
++                    //channel.time_shift += clip_duration;
++                    
++                    debug!(target: Target::file_mail(), channel = id;
++                        "[play] Pré-ajustando time_shift em -{} segundos para compensar cálculo posterior", 
++                        clip_duration);
++                }
++                
++                // Em vez de seguir em frente, retroceder o índice para que este arquivo seja processado
++                // novamente, agora que está marcado como incompatível
++                let current_index = manager.current_index.load(Ordering::SeqCst);
++                if current_index > 0 {
++                    manager.current_index.store(current_index - 1, Ordering::SeqCst);
++                }
++                
++                // Forçar init_clip a ser executado na próxima iteração, mas sem reinicializar toda a playlist
++                manager.list_init.store(false, Ordering::SeqCst);
++                
++                debug!(target: Target::file_mail(), channel = id;
++                    "[play] Retrocedendo índice para reprocessar arquivo incompatível como filler");
++                
++                continue;
++            },
++            Ok(Err(e)) => {
++                debug!(target: Target::file_mail(), channel = id;
++                    "[play] Erro diferente de DecodingError: {:?}", e);
++                return Err(e);
++            },
++            Err(e) => {
++                debug!(target: Target::file_mail(), channel = id;
++                    "[play] Erro na task de decodificação: {:?}", e);
++                return Err(ServiceError::InternalServerError);
++            },
++        }
+     }
+ 
+     Ok(())
+diff --git a/engine/src/player/utils/import.rs b/engine/src/player/utils/import.rs
+index c30fe8b1..5f398b2b 100644
+--- a/engine/src/player/utils/import.rs
++++ b/engine/src/player/utils/import.rs
+@@ -1,3 +1,45 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 16 é o arquivo '/engine/src/player/utils/import.rs'
++// Informações adicionais:
++// - Tamanho: 2203 bytes
++// - Número de linhas sem o cabeçalho: 82
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Tue Jan 21 10:10:36 2025 +0100
++// - Possível propósito: Processamento de mídia
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - Nenhuma struct definido neste arquivo
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Outras funções:
++// - pub async fn import_file(
++//
++// Dependências (imports completos):
++// - use std::{
++//   io::{Error, ErrorKind},
++//   path::Path,
++//   };
++// - use tokio::{
++//   fs::{create_dir_all, File},
++//   io::{AsyncBufReadExt, BufReader},
++//   };
++// - use crate::player::utils::{json_reader, json_serializer::JsonPlaylist, json_writer, Media};
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ /// Import text/m3u file and create a playlist out of it
+ use std::{
+     io::{Error, ErrorKind},
+@@ -50,7 +92,7 @@ pub async fn import_file(
+     let mut lines = reader.lines();
+     while let Some(line) = lines.next_line().await? {
+         if !line.starts_with('#') {
+-            let item = Media::new(0, &line, true).await;
++            let item = Media::new(0, &line, true, None).await;
+ 
+             if item.duration > 0.0 {
+                 playlist.program.push(item);
+diff --git a/engine/src/player/utils/json_serializer.rs b/engine/src/player/utils/json_serializer.rs
+index 0d0ed0b6..e48d72d6 100644
+--- a/engine/src/player/utils/json_serializer.rs
++++ b/engine/src/player/utils/json_serializer.rs
+@@ -1,3 +1,60 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 11 é o arquivo '/engine/src/player/utils/json_serializer.rs'
++// Informações adicionais:
++// - Tamanho: 7103 bytes
++// - Número de linhas sem o cabeçalho: 230
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Sun Jan 19 20:51:27 2025 +0100
++// - Possível propósito: Processamento de mídia
++//
++// Documentação da struct:
++// This is our main playlist object, it holds all necessary information for the current day.
++// #[derive(Debug, Serialize, Deserialize, Clone)]
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - pub struct JsonPlaylist {
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Funções de inicialização:
++// - pub fn new(date: String, start: f64) -> Self {
++//
++// Outras funções:
++// - fn eq(&self, other: &Self) -> bool {
++// - fn default_channel() -> String {
++// - pub fn set_defaults(playlist: &mut JsonPlaylist) {
++// - pub async fn read_json(
++//
++// Dependências (imports completos):
++// - use std::{
++//   path::Path,
++//   sync::{atomic::AtomicBool, Arc},
++//   };
++// - use log::*;
++// - use serde::{Deserialize, Serialize};
++// - use tokio::{fs::File, io::AsyncReadExt, sync::Mutex};
++// - use crate::player::utils::{
++//   get_date, is_remote, json_validate::validate_playlist, modified_time, time_from_header, Media,
++//   PlayoutConfig,
++//   };
++// - use crate::utils::{config::DUMMY_LEN, logging::Target};
++// - use crate::player::controller::ChannelManager;
++// - use std::collections::HashSet;
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::{
+     path::Path,
+     sync::{atomic::AtomicBool, Arc},
+@@ -12,6 +69,8 @@ use crate::player::utils::{
+     PlayoutConfig,
+ };
+ use crate::utils::{config::DUMMY_LEN, logging::Target};
++use crate::player::controller::ChannelManager;
++use std::collections::HashSet;
+ 
+ /// This is our main playlist object, it holds all necessary information for the current day.
+ #[derive(Debug, Serialize, Deserialize, Clone)]
+@@ -98,6 +157,7 @@ pub async fn read_json(
+     is_alive: Arc<AtomicBool>,
+     seek: bool,
+     get_next: bool,
++    manager: Option<ChannelManager>,
+ ) -> JsonPlaylist {
+     let id = config.general.channel_id;
+     let config_clone = config.clone();
+@@ -145,12 +205,20 @@ pub async fn read_json(
+                     let list_clone = playlist.clone();
+ 
+                     if !config.general.skip_validation {
++
++                        let incompatible_files = manager
++                        .as_ref()
++                        .map(|mgr| mgr.incompatible_files.clone())
++                        .unwrap_or_else(|| Arc::new(Mutex::new(HashSet::new())));
++                
+                         tokio::spawn(validate_playlist(
+                             config_clone,
+                             current_list,
+                             list_clone,
+                             is_alive,
++                            incompatible_files,
+                         ));
++                    
+                     }
+ 
+                     set_defaults(&mut playlist);
+@@ -192,11 +260,18 @@ pub async fn read_json(
+         let list_clone = playlist.clone();
+ 
+         if !config.general.skip_validation {
++            
++            let incompatible_files = manager
++            .as_ref()
++            .map(|mgr| mgr.incompatible_files.clone())
++            .unwrap_or_else(|| Arc::new(Mutex::new(HashSet::new())));
++    
+             tokio::spawn(validate_playlist(
+                 config_clone,
+                 current_list,
+                 list_clone,
+                 is_alive,
++                incompatible_files,
+             ));
+         }
+ 
+diff --git a/engine/src/player/utils/json_validate.rs b/engine/src/player/utils/json_validate.rs
+index 650a0916..4dbe56c6 100644
+--- a/engine/src/player/utils/json_validate.rs
++++ b/engine/src/player/utils/json_validate.rs
+@@ -1,3 +1,63 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 3 é o arquivo '/engine/src/player/utils/json_validate.rs'
++// Informações adicionais:
++// - Tamanho: 10668 bytes
++// - Número de linhas sem o cabeçalho: 303
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Wed Feb 19 20:18:30 2025 -0300
++// - Possível propósito: Processamento de mídia
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - Nenhuma struct definido neste arquivo
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Outras funções:
++// - async fn check_media(
++// - pub async fn validate_playlist(
++//
++// Dependências (imports completos):
++// - use std::{
++//   process::Stdio,
++//   sync::{
++//   atomic::{AtomicBool, Ordering},
++//   Arc,
++//   },
++//   time::Instant,
++//   };
++// - use log::*;
++// - use regex::Regex;
++// - use tokio::{
++//   io::{AsyncBufReadExt, BufReader},
++//   process::Command,
++//   sync::Mutex,
++//   };
++// - use crate::player::filter::FilterType::Audio;
++// - use crate::player::utils::{
++//   is_close, is_remote, loop_image, sec_to_time, seek_and_length, JsonPlaylist, Media,
++//   };
++// - use crate::utils::{
++//   config::{OutputMode::Null, PlayoutConfig, FFMPEG_IGNORE_ERRORS, IMAGE_FORMAT},
++//   errors::ProcessError,
++//   logging::Target,
++//   };
++// - use crate::vec_strings;
++// - use std::collections::HashSet;
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::{
+     process::Stdio,
+     sync::{
+@@ -23,8 +83,17 @@ use crate::utils::{
+     config::{OutputMode::Null, PlayoutConfig, FFMPEG_IGNORE_ERRORS, IMAGE_FORMAT},
+     errors::ProcessError,
+     logging::Target,
++    recovery::{
++        enter_recovery_mode,
++        exit_recovery_mode, 
++        is_in_recovery_mode,
++        mark_file_incompatible,
++        is_file_incompatible,
++        clear_incompatible_files
++    },
+ };
+ use crate::vec_strings;
++use std::collections::HashSet;
+ 
+ /// Validate a single media file.
+ ///
+@@ -163,6 +232,7 @@ pub async fn validate_playlist(
+     current_list: Arc<Mutex<Vec<Media>>>,
+     mut playlist: JsonPlaylist,
+     is_alive: Arc<AtomicBool>,
++    incompatible_files: Arc<Mutex<HashSet<String>>>,
+ ) {
+     let id = config.general.channel_id;
+     let date = playlist.date;
+@@ -185,22 +255,56 @@ pub async fn validate_playlist(
+             return;
+         }
+ 
++        //Verificar se já é conhecido como incompatível
++        let is_incompatible = {
++            let files = incompatible_files.lock().await;
++            files.contains(&item.source)
++        };
++
++        if is_incompatible {
++            // debug!(target: Target::file_mail(), channel = id;
++            //     "[Validation] Pulando arquivo incompatível conhecido: {}", 
++            //     item.source
++            // );
++            continue;
++        }
++
+         let pos = index + 1;
+ 
+         if !is_remote(&item.source) {
+-            if item.audio.is_empty() {
+-                if let Err(e) = item.add_probe(false).await {
++            // VERIFICAÇÃO ADICIONAL antes de tentar add_probe
++            let is_now_incompatible = {
++                let files = incompatible_files.lock().await;
++                files.contains(&item.source)
++            };
++            
++            if is_now_incompatible {
++                // debug!(target: Target::file_mail(), channel = id;
++                //     "[Validation] Evitando add_probe em arquivo incompatível: {}", 
++                //     item.source
++                // );
++                continue;
++            }
++                if item.audio.is_empty() {
++                    if let Err(e) = item.add_probe(false).await {
++                        error!(target: Target::file_mail(), channel = id;
++                            "[Validation] Error on position <yellow>{pos:0>3}</> - <yellow>{}</>: {e}",
++                            sec_to_time(begin)
++                        );
++
++                        // Adiciona à lista de incompatíveis
++                        incompatible_files.lock().await.insert(item.source.clone());
++                        continue;
++                    }
++                } else if let Err(e) = item.add_probe(true).await {
+                     error!(target: Target::file_mail(), channel = id;
+                         "[Validation] Error on position <yellow>{pos:0>3}</> - <yellow>{}</>: {e}",
+                         sec_to_time(begin)
+                     );
++                    // Adiciona à lista de incompatíveis
++                    incompatible_files.lock().await.insert(item.source.clone());
++                    continue;
+                 }
+-            } else if let Err(e) = item.add_probe(true).await {
+-                error!(target: Target::file_mail(), channel = id;
+-                    "[Validation] Error on position <yellow>{pos:0>3}</> - <yellow>{}</>: {e}",
+-                    sec_to_time(begin)
+-                );
+-            }
+         }
+ 
+         if item.probe.is_some() {
+diff --git a/engine/src/player/utils/mod.rs b/engine/src/player/utils/mod.rs
+index b086eeef..aac2bd21 100644
+--- a/engine/src/player/utils/mod.rs
++++ b/engine/src/player/utils/mod.rs
+@@ -1,3 +1,240 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 14 é o arquivo '/engine/src/player/utils/mod.rs'
++// Informações adicionais:
++// - Tamanho: 37513 bytes
++// - Número de linhas sem o cabeçalho: 1239
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Wed Feb 19 20:18:30 2025 -0300
++// - Possível propósito: Configuração, Iterador, Processamento de mídia
++//
++// Documentação da struct:
++// Compare incoming stream name with expecting name, but ignore question mark.
++// pub fn valid_stream(msg: &str) -> bool {
++// if let Some((unexpected, expected)) = msg.split_once(',') {
++// let re = Regex::new(r".*Unexpected stream|App field don't match up|expecting|[\s]+|\?$")
++// .unwrap();
++// let unexpected = re.replace_all(unexpected, "");
++// let expected = re.replace_all(expected, "");
++// if unexpected == expected {
++// return true;
++// }
++// }
++// false
++// }
++// Prepare output parameters
++// 
++// Seek for multiple outputs and add mapping for it.
++// pub fn prepare_output_cmd(
++// config: &PlayoutConfig,
++// mut cmd: Vec<String>,
++// filters: &Option<Filters>,
++// ) -> Vec<String> {
++// let mut output_params = config.output.clone().output_cmd.unwrap();
++// let mut new_params = vec![];
++// let mut count = 0;
++// let re_v = Regex::new(r"\[?0:v(:0)?\]?").unwrap();
++// if let Some(mut filter) = filters.clone() {
++// for (i, param) in output_params.iter().enumerate() {
++// if filter.video_out_link.len() > count && re_v.is_match(param) {
++// // replace mapping with link from filter struct
++// new_params.push(filter.video_out_link[count].clone());
++// } else {
++// new_params.push(param.clone());
++// }
++// // Check if parameter is a output
++// if i > 0
++// && !param.starts_with('-')
++// && !output_params[i - 1].starts_with('-')
++// && i < output_params.len() - 1
++// {
++// count += 1;
++// if filter.video_out_link.len() > count
++// && !output_params.contains(&"-map".to_string())
++// {
++// new_params.append(&mut vec_strings!["-map", filter.video_out_link[count]]);
++// for i in 0..config.processing.audio_tracks {
++// new_params.append(&mut vec_strings!["-map", format!("0:a:{i}")]);
++// }
++// }
++// }
++// }
++// output_params = new_params;
++// cmd.append(&mut filter.cmd());
++// // add mapping at the begin, if needed
++// if !filter.map().iter().all(|item| output_params.contains(item))
++// && filter.output_chain.is_empty()
++// && filter.video_out_link.is_empty()
++// {
++// cmd.append(&mut filter.map());
++// } else if &output_params[0] != "-map" && !filter.video_out_link.is_empty() {
++// cmd.append(&mut vec_strings!["-map", filter.video_out_link[0].clone()]);
++// for i in 0..config.processing.audio_tracks {
++// cmd.append(&mut vec_strings!["-map", format!("0:a:{i}")]);
++// }
++// }
++// }
++// if config.processing.vtt_enable {
++// let i = cmd.iter().filter(|&n| n == "-i").count().saturating_sub(1);
++// cmd.append(&mut vec_strings!("-map", format!("{i}:s?")));
++// }
++// cmd.append(&mut output_params);
++// cmd
++// }
++// map media struct to json object
++// pub fn get_media_map(media: Media) -> Value {
++// let mut obj = json!({
++// "in": media.seek,
++// "out": media.out,
++// "duration": media.duration,
++// "category": media.category,
++// "source": media.source,
++// });
++// if let Some(title) = media.title {
++// obj.as_object_mut()
++// .unwrap()
++// .insert("title".to_string(), Value::String(title));
++// }
++// obj
++// }
++// prepare json object for response
++// pub async fn get_data_map(manager: &ChannelManager) -> Map<String, Value> {
++// let media = manager
++// .current_media
++// .lock()
++// .await
++// .clone()
++// .unwrap_or_else(Media::default);
++// let channel = manager.channel.lock().await.clone();
++// let config = manager.config.lock().await.processing.clone();
++// let ingest_is_alive = manager.ingest_is_alive.load(Ordering::SeqCst);
++// let mut data_map = Map::new();
++// let current_time = time_in_seconds(&channel.timezone);
++// let shift = channel.time_shift;
++// let begin = media.begin.unwrap_or(0.0) - shift;
++// let played_time = current_time - begin;
++// data_map.insert("index".to_string(), json!(media.index));
++// data_map.insert("ingest".to_string(), json!(ingest_is_alive));
++// data_map.insert("mode".to_string(), json!(config.mode));
++// data_map.insert(
++// "shift".to_string(),
++// json!((shift * 1000.0).round() / 1000.0),
++// );
++// data_map.insert(
++// "elapsed".to_string(),
++// json!((played_time * 1000.0).round() / 1000.0),
++// );
++// data_map.insert("media".to_string(), get_media_map(media));
++// data_map
++// }
++// Video clip struct to hold some important states and comments for current media.
++// #[derive(Debug, Serialize, Deserialize, Clone)]
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - pub struct Media {
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Funções de inicialização:
++// - pub async fn new(index: usize, src: &str, do_probe: bool, manager: Option<Arc<ChannelManager>>) -> Self {
++//
++// Outras funções:
++// - pub fn valid_stream(msg: &str) -> bool {
++// - pub fn prepare_output_cmd(
++// - pub fn get_media_map(media: Media) -> Value {
++// - pub async fn get_data_map(manager: &ChannelManager) -> Map<String, Value> {
++// - pub async fn add_probe(&mut self, check_audio: bool) -> Result<(), String> {
++// - pub async fn add_filter(
++// - fn default() -> Self {
++// - fn eq(&self, other: &Self) -> bool {
++// - fn null_string<'de, D>(d: D) -> Result<String, D::Error>
++// - fn is_empty_string(st: &String) -> bool {
++// - pub fn fps_calc(r_frame_rate: &str, default: f64) -> f64 {
++// - pub async fn json_reader(path: &PathBuf) -> Result<JsonPlaylist, Error> {
++// - pub async fn json_writer(path: &PathBuf, data: JsonPlaylist) -> Result<(), Error> {
++// - pub fn time_in_seconds(timezone: &Option<Tz>) -> f64 {
++// - pub fn get_date(seek: bool, start: f64, get_next: bool, timezone: &Option<Tz>) -> String {
++// - pub fn time_from_header(headers: &header::HeaderMap) -> Option<DateTime<Local>> {
++// - pub async fn modified_time(path: &str) -> Option<String> {
++// - pub fn time_to_sec(time_str: &str, timezone: &Option<Tz>) -> f64 {
++// - pub fn sec_to_time(sec: f64) -> String {
++// - pub fn file_extension(filename: &Path) -> Option<&str> {
++// - pub fn is_close(a: f64, b: f64, to: f64) -> bool {
++// - pub fn sum_durations(clip_list: &[Media]) -> f64 {
++// - pub fn get_delta(config: &PlayoutConfig, begin: &f64) -> (f64, f64) {
++// - pub fn loop_image(config: &PlayoutConfig, node: &Media) -> Vec<String> {
++// - pub fn loop_filler(config: &PlayoutConfig, node: &Media) -> Vec<String> {
++// - pub fn seek_and_length(config: &PlayoutConfig, node: &mut Media) -> Vec<String> {
++// - pub fn gen_dummy(config: &PlayoutConfig, duration: f64) -> (String, Vec<String>) {
++// - pub fn is_remote(path: &str) -> bool {
++// - pub fn include_file_extension(config: &PlayoutConfig, file_path: &Path) -> bool {
++// - pub async fn stderr_reader(
++// - async fn is_in_system(name: &str) -> Result<(), String> {
++// - async fn ffmpeg_filter_and_libs(config: &mut PlayoutConfig) -> Result<(), String> {
++// - pub async fn validate_ffmpeg(config: &mut PlayoutConfig) -> Result<(), String> {
++// - pub fn gen_tcp_socket(exclude_socket: String) -> Option<String> {
++// - pub fn is_free_tcp_port(url: &str) -> bool {
++// - pub fn get_date_range(id: i32, date_range: &[String]) -> Vec<String> {
++// - pub fn parse_log_level_filter(s: &str) -> Result<LevelFilter, &'static str> {
++// - pub fn custom_format<T: fmt::Display>(template: &str, args: &[T]) -> String {
++// - fn gcd(a: u32, b: u32) -> u32 {
++// - pub fn fraction(d: f64, max_denominator: u32) -> (u32, u32) {
++// - pub fn calc_aspect(config: &PlayoutConfig, aspect_string: &Option<String>) -> f64 {
++//
++// Dependências (imports completos):
++// - use std::{
++//   ffi::OsStr,
++//   fmt,
++//   io::Error,
++//   net::TcpListener,
++//   path::{Path, PathBuf},
++//   process::{exit, Stdio},
++//   str::FromStr,
++//   sync::{atomic::Ordering, Arc},
++//   };
++// - use chrono::{prelude::*, TimeDelta};
++// - use chrono_tz::Tz;
++// - use log::*;
++// - use probe::MediaProbe;
++// - use rand::prelude::*;
++// - use regex::Regex;
++// - use reqwest::header;
++// - use serde::{de::Deserializer, Deserialize, Serialize};
++// - use serde_json::{json, Map, Value};
++// - use tokio::{
++//   fs::{metadata, File},
++//   io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
++//   process::{ChildStderr, Command},
++//   sync::Mutex,
++//   };
++// - use crate::player::{
++//   controller::{
++//   ChannelManager,
++//   ProcessUnit::{self, *},
++//   },
++//   filter::{filter_chains, Filters},
++//   };
++// - use crate::utils::{
++//   config::{OutputMode::*, PlayoutConfig, FFMPEG_IGNORE_ERRORS, FFMPEG_UNRECOVERABLE_ERRORS, FFMPEG_DECODING_ERRORS},
++//   errors::ServiceError,
++//   logging::Target,
++//   time_machine::time_now,
++//   };
++// - use crate::vec_strings;
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::{
+     ffi::OsStr,
+     fmt,
+@@ -38,10 +275,18 @@ use crate::player::{
+     filter::{filter_chains, Filters},
+ };
+ use crate::utils::{
+-    config::{OutputMode::*, PlayoutConfig, FFMPEG_IGNORE_ERRORS, FFMPEG_UNRECOVERABLE_ERRORS},
++    config::{OutputMode::*, PlayoutConfig, FFMPEG_IGNORE_ERRORS, FFMPEG_UNRECOVERABLE_ERRORS, FFMPEG_DECODING_ERRORS},
+     errors::ServiceError,
+     logging::Target,
+     time_machine::time_now,
++    recovery::{
++        enter_recovery_mode,
++        exit_recovery_mode, 
++        is_in_recovery_mode,
++        mark_file_incompatible,
++        is_file_incompatible,
++        clear_incompatible_files
++    },
+ };
+ pub use json_serializer::{read_json, JsonPlaylist};
+ 
+@@ -248,10 +493,13 @@ pub struct Media {
+ 
+     #[serde(default, skip_serializing)]
+     pub unit: ProcessUnit,
++
++    #[serde(skip_serializing, skip_deserializing)]
++    pub manager: Option<Arc<ChannelManager>>  // Alterado para Arc
+ }
+ 
+ impl Media {
+-    pub async fn new(index: usize, src: &str, do_probe: bool) -> Self {
++    pub async fn new(index: usize, src: &str, do_probe: bool, manager: Option<Arc<ChannelManager>>) -> Self {
+         let mut duration = 0.0;
+         let mut probe = None;
+ 
+@@ -283,6 +531,7 @@ impl Media {
+             next_ad: false,
+             skip: false,
+             unit: Decoder,
++            manager,
+         }
+     }
+ 
+@@ -362,6 +611,7 @@ impl Default for Media {
+             next_ad: false,
+             skip: false,
+             unit: Decoder,
++            manager: None,
+         }
+     }
+ }
+@@ -883,6 +1133,21 @@ pub async fn stderr_reader(
+                 line.replace("[error] ", "").replace("[fatal] ", "")
+             );
+ 
++            if FFMPEG_DECODING_ERRORS.iter().any(|e| line.contains(e)) {
++                // Adicionar em stderr_reader ao detectar erro de decodificação
++                // debug!(target: Target::file_mail(), channel = channel_id;
++                //     "[stderr_reader] Erro de decodificação encontrado: {} - substituindo por filler com duração exata", 
++                //     line.replace("[error] ", "").replace("[fatal] ", ""));
++
++                // // Adicionar em play ao adicionar arquivo à lista de incompatíveis
++                // debug!(target: Target::file_mail(), channel = channel_id;
++                //     "[play] Arquivo marcado como incompatível: - será substituído por filler com duração idêntica"
++                // );
++                return Err(ServiceError::DecodingError(
++                    format!("Erro de decodificação: {}", line.replace("[error] ", "").replace("[fatal] ", ""))
++                 ));
++            }
++
+             if FFMPEG_UNRECOVERABLE_ERRORS
+                 .iter()
+                 .any(|i| line.contains(*i))
+diff --git a/engine/src/utils/config.rs b/engine/src/utils/config.rs
+index aa15679b..7b549b12 100644
+--- a/engine/src/utils/config.rs
++++ b/engine/src/utils/config.rs
+@@ -1,3 +1,96 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 4 é o arquivo '/engine/src/utils/config.rs'
++// Informações adicionais:
++// - Tamanho: 30564 bytes
++// - Número de linhas sem o cabeçalho: 970
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Tue Feb 11 12:43:28 2025 +0100
++// - Possível propósito: Configuração, Acesso a dados, Processamento de mídia
++//
++// Documentação da struct:
++// Channel Config
++// 
++// This we init ones, when ffplayout is starting and use them globally in the hole program.
++// #[derive(Debug, Default, Clone, Deserialize, Serialize, TS)]
++// #[ts(export, export_to = "playout_config.d.ts")]
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - pub struct Template {
++// - pub struct Source {
++// - pub struct PlayoutConfig {
++// - pub struct Channel {
++// - pub struct General {
++// - pub struct Mail {
++// - pub struct Logging {
++// - pub struct Processing {
++// - pub struct Ingest {
++// - pub struct Playlist {
++// - pub struct Storage {
++// - pub struct Text {
++// - pub struct Task {
++// - pub struct Output {
++//
++// Enumerações (enums):
++// - pub enum OutputMode {
++// - pub enum ProcessMode {
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Funções de inicialização:
++// - fn new(s: &str) -> Self {
++// - pub fn new(config: &models::GlobalSettings, channel: models::Channel) -> Self {
++// - fn new(config: &models::Configuration) -> Self {
++// - fn new(global: &models::GlobalSettings, config: &models::Configuration) -> Self {
++// - fn new(config: &models::Configuration, path: PathBuf, shared_storage: bool) -> Self {
++// - pub async fn new(pool: &Pool<Sqlite>, channel_id: i32) -> Result<Self, ServiceError> {
++//
++// Outras funções:
++// - fn from_str(input: &str) -> Result<Self, Self::Err> {
++// - fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++// - fn default() -> Self {
++// - pub fn string_to_log_level(l: String) -> Level {
++// - pub fn string_to_processing_mode(l: String) -> ProcessMode {
++// - pub fn string_to_output_mode(l: String) -> OutputMode {
++// - fn default_track_index() -> i32 {
++// - pub async fn dump(pool: &Pool<Sqlite>, id: i32) -> Result<(), ServiceError> {
++// - pub async fn import(pool: &Pool<Sqlite>, id: i32, path: &Path) -> Result<(), ServiceError> {
++// - fn pre_audio_codec(proc_filter: &str, ingest_filter: &str, channel_count: u8) -> Vec<String> {
++// - pub async fn get_config(
++//
++// Dependências (imports completos):
++// - use std::{
++//   fmt,
++//   path::{Path, PathBuf},
++//   str::FromStr,
++//   };
++// - use chrono::NaiveTime;
++// - use chrono_tz::Tz;
++// - use flexi_logger::Level;
++// - use regex::Regex;
++// - use serde::{Deserialize, Serialize};
++// - use shlex::split;
++// - use sqlx::{Pool, Sqlite};
++// - use tokio::{fs, io::AsyncReadExt};
++// - use ts_rs::TS;
++// - use crate::db::{handles, models};
++// - use crate::file::norm_abs_path;
++// - use crate::utils::{gen_tcp_socket, time_to_sec};
++// - use crate::vec_strings;
++// - use crate::AdvancedConfig;
++// - use crate::ARGS;
++// - use super::errors::ServiceError;
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::{
+     fmt,
+     path::{Path, PathBuf},
+@@ -58,6 +151,14 @@ pub const FFMPEG_UNRECOVERABLE_ERRORS: [&str; 9] = [
+     "Option not found",
+ ];
+ 
++pub const FFMPEG_DECODING_ERRORS: [&str; 5] = [
++    "no frame",
++    "CUDA_ERROR_OUT_OF_MEMORY",
++    "CUDA_ERROR_INVALID_VALUE",
++    "CUDA_ERROR_INVALID_CONTEXT",
++    "No device available for decoder",
++];
++
+ #[derive(Debug, Clone, Default, Eq, PartialEq, Deserialize, Serialize, TS)]
+ #[ts(export, export_to = "playout_config.d.ts")]
+ #[serde(rename_all = "lowercase")]
+diff --git a/engine/src/utils/errors.rs b/engine/src/utils/errors.rs
+index 1bd6fac1..33edc4a8 100644
+--- a/engine/src/utils/errors.rs
++++ b/engine/src/utils/errors.rs
+@@ -1,3 +1,65 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 17 é o arquivo '/engine/src/utils/errors.rs'
++// Informações adicionais:
++// - Tamanho: 6241 bytes
++// - Número de linhas sem o cabeçalho: 243
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Mon Jan 20 21:30:53 2025 +0100
++// - Possível propósito: Tratamento de erros, Acesso a dados, API/Web, Processamento de mídia
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - Nenhuma struct definido neste arquivo
++//
++// Enumerações (enums):
++// - pub enum ServiceError {
++// - pub enum ProcessError {
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Outras funções:
++// - fn error_response(&self) -> HttpResponse {
++// - fn from(err: String) -> Self {
++// - fn from(err: Error) -> Self {
++// - fn from(err: actix_multipart::MultipartError) -> Self {
++// - fn from(err: std::io::Error) -> Self {
++// - fn from(err: chrono::ParseError) -> Self {
++// - fn from(err: std::num::ParseIntError) -> Self {
++// - fn from(err: jsonwebtoken::errors::Error) -> Self {
++// - fn from(err: actix_web::error::BlockingError) -> Self {
++// - fn from(err: sqlx::Error) -> Self {
++// - fn from(err: tokio::task::JoinError) -> Self {
++// - fn from(err: toml_edit::ser::Error) -> Self {
++// - fn from(err: toml_edit::TomlError) -> Self {
++// - fn from(err: uuid::Error) -> Self {
++// - fn from(err: serde_json::Error) -> Self {
++// - fn from(err: &str) -> Self {
++// - fn from(err: ProcessError) -> Self {
++// - fn from(err: FfProbeError) -> Self {
++// - fn from(err: lettre::address::AddressError) -> Self {
++// - fn from(err: lettre::transport::smtp::Error) -> Self {
++// - fn from(err: lettre::error::Error) -> Self {
++// - fn from(err: regex::Error) -> Self {
++// - fn from(err: sqlx::migrate::MigrateError) -> Self {
++// - fn from(err: inquire::InquireError) -> Self {
++// - fn from(err: ServiceError) -> Self {
++//
++// Dependências (imports completos):
++// - use std::io;
++// - use actix_web::{error::ResponseError, Error, HttpResponse};
++// - use derive_more::Display;
++// - use crate::player::utils::probe::FfProbeError;
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::io;
+ 
+ use actix_web::{error::ResponseError, Error, HttpResponse};
+@@ -27,6 +89,9 @@ pub enum ServiceError {
+ 
+     #[display("ServiceUnavailable: {_0}")]
+     ServiceUnavailable(String),
++
++    #[display("DecodingError: {_0}")]
++    DecodingError(String),
+ }
+ 
+ // impl ResponseError trait allows to convert our errors into http responses with appropriate data
+@@ -43,6 +108,9 @@ impl ResponseError for ServiceError {
+             Self::NoContent(ref message) => HttpResponse::NoContent().json(message),
+             Self::ServiceUnavailable(ref message) => {
+                 HttpResponse::ServiceUnavailable().json(message)
++            },
++            Self::DecodingError(ref message) => {
++                HttpResponse::UnprocessableEntity().json(message)
+             }
+         }
+     }
+diff --git a/engine/src/utils/generator.rs b/engine/src/utils/generator.rs
+index 350333d3..261287f3 100644
+--- a/engine/src/utils/generator.rs
++++ b/engine/src/utils/generator.rs
+@@ -1,3 +1,60 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 12 é o arquivo '/engine/src/utils/generator.rs'
++// Informações adicionais:
++// - Tamanho: 9745 bytes
++// - Número de linhas sem o cabeçalho: 322
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Wed Feb 5 21:30:00 2025 +0100
++// - Possível propósito: Acesso a dados, Iterador, Processamento de mídia
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - Nenhuma struct definido neste arquivo
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Outras funções:
++// - pub fn random_list(clip_list: Vec<Media>, total_length: f64) -> Vec<Media> {
++// - pub fn ordered_list(clip_list: Vec<Media>, total_length: f64) -> Vec<Media> {
++// - pub async fn filler_list(
++// - pub async fn generate_from_template(
++// - pub async fn playlist_generator(manager: &ChannelManager) -> Result<Vec<JsonPlaylist>, Error> {
++//
++// Dependências (imports completos):
++// - use std::io::Error;
++// - use async_walkdir::WalkDir;
++// - use chrono::Timelike;
++// - use lexical_sort::{natural_lexical_cmp, StringSort};
++// - use log::*;
++// - use rand::{rng, seq::SliceRandom, Rng};
++// - use tokio::fs;
++// - use tokio_stream::StreamExt;
++// - use crate::player::{
++//   controller::ChannelManager,
++//   input::folder::FolderSource,
++//   utils::{
++//   get_date_range, include_file_extension, json_serializer::JsonPlaylist, sum_durations, Media,
++//   },
++//   };
++// - use crate::utils::{
++//   config::{PlayoutConfig, Template},
++//   logging::Target,
++//   time_to_sec,
++//   };
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ /// Simple Playlist Generator
+ ///
+ /// You can call ffplayout[.exe] -g YYYY-mm-dd - YYYY-mm-dd to generate JSON playlists.
+@@ -165,7 +222,7 @@ pub async fn generate_from_template(
+             }
+ 
+             for entry in file_list {
+-                let media = Media::new(0, &entry, true).await;
++                let media = Media::new(0, &entry, true, Some(manager.clone().into())).await;
+                 source_list.push(media);
+             }
+         }
+diff --git a/engine/src/utils/mod.rs b/engine/src/utils/mod.rs
+index b1b616ba..c29474a0 100644
+--- a/engine/src/utils/mod.rs
++++ b/engine/src/utils/mod.rs
+@@ -28,6 +28,7 @@ pub mod playlist;
+ pub mod system;
+ pub mod task_runner;
+ pub mod time_machine;
++pub mod recovery;
+ 
+ use crate::db::GLOBAL_SETTINGS;
+ use crate::player::utils::time_to_sec;
+diff --git a/tests/src/engine_cmd.rs b/tests/src/engine_cmd.rs
+index 6f4bd76b..45572a44 100644
+--- a/tests/src/engine_cmd.rs
++++ b/tests/src/engine_cmd.rs
+@@ -1,3 +1,69 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 19 é o arquivo '/tests/src/engine_cmd.rs'
++// Informações adicionais:
++// - Tamanho: 43491 bytes
++// - Número de linhas sem o cabeçalho: 1877
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Tue Feb 11 12:43:28 2025 +0100
++// - Possível propósito: Configuração, Acesso a dados, Processamento de mídia
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - Nenhuma struct definido neste arquivo
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Outras funções:
++// - async fn get_config() -> (PlayoutConfig, ChannelManager) {
++// - async fn video_audio_input() {
++// - async fn video_audio_custom_filter1_input() {
++// - async fn video_audio_custom_filter2_input() {
++// - async fn video_audio_custom_filter3_input() {
++// - async fn dual_audio_aevalsrc_input() {
++// - async fn dual_audio_input() {
++// - async fn video_separate_audio_input() {
++// - async fn video_audio_stream() {
++// - async fn video_audio_filter1_stream() {
++// - async fn video_audio_filter2_stream() {
++// - async fn video_audio_filter3_stream() {
++// - async fn video_audio_filter4_stream() {
++// - async fn video_dual_audio_stream() {
++// - async fn video_dual_audio_filter_stream() {
++// - async fn video_audio_multi_stream() {
++// - async fn video_dual_audio_multi_stream() {
++// - async fn video_audio_text_multi_stream() {
++// - async fn video_dual_audio_multi_filter_stream() {
++// - async fn video_audio_text_filter_stream() {
++// - async fn video_audio_hls() {
++// - async fn video_audio_sub_meta_hls() {
++// - async fn video_multi_audio_hls() {
++// - async fn multi_video_audio_hls() {
++// - async fn multi_video_multi_audio_hls() {
++//
++// Dependências (imports completos):
++// - use std::fs;
++// - use sqlx::sqlite::SqlitePoolOptions;
++// - use ffplayout::db::handles;
++// - use ffplayout::player::{
++//   controller::{ChannelManager, ProcessUnit::*},
++//   utils::{prepare_output_cmd, seek_and_length, Media},
++//   };
++// - use ffplayout::utils::config::{OutputMode::*, PlayoutConfig};
++// - use ffplayout::vec_strings;
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::fs;
+ 
+ use sqlx::sqlite::SqlitePoolOptions;
+@@ -44,7 +110,7 @@ async fn video_audio_input() {
+     let logo_path = fs::canonicalize("./assets/logo.png").unwrap();
+     config.processing.logo_path = logo_path.to_string_lossy().to_string();
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd =
+@@ -71,7 +137,7 @@ async fn video_audio_custom_filter1_input() {
+     config.processing.add_logo = false;
+     config.processing.custom_filter = "[0:v]gblur=2[c_v_out];[0:a]volume=0.2[c_a_out]".to_string();
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd = vec_strings![
+@@ -99,7 +165,7 @@ async fn video_audio_custom_filter2_input() {
+         "[0:v]null[v];movie=logo.png[l];[v][l]overlay[c_v_out];[0:a]volume=0.2[c_a_out]"
+             .to_string();
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd = vec_strings![
+@@ -126,7 +192,7 @@ async fn video_audio_custom_filter3_input() {
+     config.processing.custom_filter =
+         "[v_in];movie=logo.png[l];[v_in][l]overlay[c_v_out];[0:a]volume=0.2[c_a_out]".to_string();
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd = vec_strings![
+@@ -152,7 +218,7 @@ async fn dual_audio_aevalsrc_input() {
+     config.processing.audio_tracks = 2;
+     config.processing.add_logo = false;
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd =
+@@ -179,7 +245,7 @@ async fn dual_audio_input() {
+     config.processing.audio_tracks = 2;
+     config.processing.add_logo = false;
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd = vec_strings![
+@@ -205,7 +271,7 @@ async fn video_separate_audio_input() {
+     config.processing.audio_tracks = 1;
+     config.processing.add_logo = false;
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/no_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/no_audio.mp4", true, None).await;
+     media.audio = "./assets/media_mix/audio.mp3".to_string();
+     media.cmd = Some(seek_and_length(&config, &mut media));
+     media.add_filter(&config, &None).await;
+@@ -1402,7 +1468,7 @@ async fn video_audio_hls() {
+         "/usr/share/ffplayout/public/live/stream.m3u8"
+     ]);
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let enc_prefix = vec_strings![
+@@ -1492,7 +1558,7 @@ async fn video_audio_sub_meta_hls() {
+         "/usr/share/ffplayout/public/live/stream.m3u8"
+     ]);
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let enc_prefix = vec_strings![
+@@ -1583,7 +1649,7 @@ async fn video_multi_audio_hls() {
+         "/usr/share/ffplayout/public/live/stream.m3u8"
+     ]);
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let enc_prefix = vec_strings![
+@@ -1689,7 +1755,7 @@ async fn multi_video_audio_hls() {
+         "/usr/share/ffplayout/public/live/stream_%v.m3u8"
+     ]);
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let enc_prefix = vec_strings![
+@@ -1806,7 +1872,7 @@ async fn multi_video_multi_audio_hls() {
+         "/usr/share/ffplayout/public/live/stream_%v.m3u8"
+     ]);
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let enc_prefix = vec_strings![
+diff --git a/tests/src/engine_filter.rs b/tests/src/engine_filter.rs
+index d84a3967..ffcf9af7 100644
+--- a/tests/src/engine_filter.rs
++++ b/tests/src/engine_filter.rs
+@@ -1,3 +1,42 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 13 é o arquivo '/tests/src/engine_filter.rs'
++// Informações adicionais:
++// - Tamanho: 1619 bytes
++// - Número de linhas sem o cabeçalho: 50
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Thu Feb 13 08:48:15 2025 +0100
++// - Possível propósito: Configuração, Acesso a dados, Processamento de mídia
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - Nenhuma struct definido neste arquivo
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Outras funções:
++// - async fn get_config() -> (PlayoutConfig, ChannelManager) {
++// - async fn simple_filtering() {
++//
++// Dependências (imports completos):
++// - use std::fs;
++// - use sqlx::sqlite::SqlitePoolOptions;
++// - use ffplayout::db::handles;
++// - use ffplayout::player::{controller::ChannelManager, utils::Media};
++// - use ffplayout::utils::config::{OutputMode::*, PlayoutConfig};
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::fs;
+ 
+ use sqlx::sqlite::SqlitePoolOptions;
+@@ -40,7 +79,7 @@ async fn simple_filtering() {
+     let logo_path = fs::canonicalize("./assets/logo.png").unwrap();
+     config.processing.logo_path = logo_path.to_string_lossy().to_string();
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let _f = media.filter.unwrap().cmd();
+diff --git a/tests/src/engine_generator.rs b/tests/src/engine_generator.rs
+index a37bf180..55c954b1 100644
+--- a/tests/src/engine_generator.rs
++++ b/tests/src/engine_generator.rs
+@@ -1,3 +1,55 @@
++// INÍCIO METADADOS CLAUDE
++// O arquivo número 15 é o arquivo '/tests/src/engine_generator.rs'
++// Informações adicionais:
++// - Tamanho: 5284 bytes
++// - Número de linhas sem o cabeçalho: 166
++// - Status Git: Modified (modificado mas não adicionado ao staging)
++// - Branch atual: skip_clip_on_cuda_decoder_error
++// - Última modificação: Thu Feb 13 08:48:15 2025 +0100
++// - Possível propósito: Configuração, Acesso a dados, Processamento de mídia
++//
++// RESUMO ESTRUTURAL:
++// --------------------------------------------------
++// Estruturas (structs):
++// - Nenhuma struct definido neste arquivo
++//
++// Enumerações (enums):
++// - Nenhuma enum definido neste arquivo
++//
++// Traits:
++// - Nenhuma trait definida neste arquivo
++//
++// Funções por categoria:
++// Outras funções:
++// - async fn prepare_config() -> (PlayoutConfig, ChannelManager) {
++// - async fn test_random_list() {
++// - async fn test_ordered_list() {
++// - async fn test_filler_list() {
++// - async fn test_generate_playlist_from_folder() {
++// - async fn test_generate_playlist_from_template() {
++//
++// Dependências (imports completos):
++// - use std::{
++//   fs,
++//   path::{Path, PathBuf},
++//   };
++// - use chrono::NaiveTime;
++// - use sqlx::sqlite::SqlitePoolOptions;
++// - use ffplayout::db::handles;
++// - use ffplayout::player::{controller::ChannelManager, utils::*};
++// - use ffplayout::utils::config::ProcessMode::Playlist;
++// - use ffplayout::utils::playlist::generate_playlist;
++// - use ffplayout::utils::{
++//   config::{PlayoutConfig, Source, Template},
++//   generator::*,
++//   };
++// --------------------------------------------------
++//
++// Este comentário foi adicionado automaticamente para facilitar 
++// o entendimento do contexto do projeto por sistemas de IA como o Claude.
++// FIM METADADOS CLAUDE
++//
++
+ use std::{
+     fs,
+     path::{Path, PathBuf},
+@@ -43,10 +95,10 @@ async fn prepare_config() -> (PlayoutConfig, ChannelManager) {
+ #[tokio::test]
+ async fn test_random_list() {
+     let clip_list = vec![
+-        Media::new(0, "./assets/media_mix/with_audio.mp4", true).await, // 30 seconds
+-        Media::new(0, "./assets/media_mix/dual_audio.mp4", true).await, // 30 seconds
+-        Media::new(0, "./assets/media_mix/av_sync.mp4", true).await,    // 30 seconds
+-        Media::new(0, "./assets/media_mix/ad.mp4", true).await,         // 25 seconds
++        Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await, // 30 seconds
++        Media::new(0, "./assets/media_mix/dual_audio.mp4", true, None).await, // 30 seconds
++        Media::new(0, "./assets/media_mix/av_sync.mp4", true, None).await,    // 30 seconds
++        Media::new(0, "./assets/media_mix/ad.mp4", true, None).await,         // 25 seconds
+     ];
+ 
+     let r_list = random_list(clip_list.clone(), 200.0);
+@@ -59,10 +111,10 @@ async fn test_random_list() {
+ #[tokio::test]
+ async fn test_ordered_list() {
+     let clip_list = vec![
+-        Media::new(0, "./assets/media_mix/with_audio.mp4", true).await, // 30 seconds
+-        Media::new(0, "./assets/media_mix/dual_audio.mp4", true).await, // 30 seconds
+-        Media::new(0, "./assets/media_mix/av_sync.mp4", true).await,    // 30 seconds
+-        Media::new(0, "./assets/media_mix/ad.mp4", true).await,         // 25 seconds
++        Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await, // 30 seconds
++        Media::new(0, "./assets/media_mix/dual_audio.mp4", true, None).await, // 30 seconds
++        Media::new(0, "./assets/media_mix/av_sync.mp4", true, None).await,    // 30 seconds
++        Media::new(0, "./assets/media_mix/ad.mp4", true, None).await,         // 25 seconds
+     ];
+ 
+     let o_list = ordered_list(clip_list.clone(), 85.0);

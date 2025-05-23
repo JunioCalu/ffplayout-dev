@@ -1,0 +1,1047 @@
+diff --git a/engine/src/player/filter/mod.rs b/engine/src/player/filter/mod.rs
+index 13ac7567..f708e111 100644
+--- a/engine/src/player/filter/mod.rs
++++ b/engine/src/player/filter/mod.rs
+@@ -15,6 +15,7 @@ use crate::player::{
+ use crate::utils::{
+     config::{OutputMode::*, PlayoutConfig},
+     logging::Target,
++    advanced_config::FilterValue,
+ };
+ use crate::vec_strings;
+ 
+@@ -86,7 +87,7 @@ impl Filters {
+         }
+     }
+ 
+-    pub fn add(&mut self, filter: &str, track_nr: i32, filter_type: FilterType) {
++    pub fn add(&mut self, filter: Option<&str>, track_nr: i32, filter_type: FilterType) {
+         let (map, chain, position, last) = match filter_type {
+             Audio => (
+                 &mut self.audio_map,
+@@ -101,97 +102,112 @@ impl Filters {
+                 &mut self.video_last,
+             ),
+         };
+-
+-        if *last == track_nr {
+-            chain.push(filter.to_string());
+-        } else {
+-            // start new filter chain
+-            let (selector, sep) = if chain.is_empty() {
+-                (String::new(), String::new())
++    
++        if let Some(filter) = filter {
++            if *last == track_nr {
++                chain.push(filter.to_string());
+             } else {
+-                (format!("[{filter_type}out{last}]"), ";".to_string())
+-            };
+-            let mut chain_start = String::new();
+-
+-            chain_start.push_str(&selector);
+-
+-            if filter.starts_with("aevalsrc") || filter.starts_with("movie") {
+-                if filter_type == Video && chain.is_empty() {
+-                    chain.push(format!("[{position}:{filter_type}:{track_nr}]null"));
++                // start new filter chain
++                let (selector, sep) = if chain.is_empty() {
++                    (String::new(), String::new())
++                } else {
++                    (format!("[{filter_type}out{last}]"), ";".to_string())
++                };
++                let mut chain_start = String::new();
++    
++                chain_start.push_str(&selector);
++    
++                if filter.starts_with("aevalsrc") || filter.starts_with("movie") {
++                    if filter_type == Video && chain.is_empty() {
++                        chain.push(format!("[{position}:{filter_type}:{track_nr}]null"));
++                    }
++                    chain_start.push_str(&sep);
++                } else {
++                    // build audio/video selector like [0:a:0]
++                    chain_start.push_str(&format!("{sep}[{position}:{filter_type}:{track_nr}]"));
+                 }
+-                chain_start.push_str(&sep);
+-            } else {
+-                // build audio/video selector like [0:a:0]
+-                chain_start.push_str(&format!("{sep}[{position}:{filter_type}:{track_nr}]"));
+-            }
+-
+-            if self.hw_context
+-                && !is_hw(filter)
+-                && !filter.contains("hwdownload")
+-                && !filter.contains("hwupload")
+-                && filter_type == Video
+-            {
+-                chain_start.push_str("hwdownload,format=nv12,");
++    
++                if self.hw_context
++                    && !is_hw(filter)
++                    && !filter.contains("hwdownload")
++                    && !filter.contains("hwupload")
++                    && filter_type == Video
++                {
++                    chain_start.push_str("hwdownload,format=nv12,");
++                }
++    
++                chain_start.push_str(filter);
++    
++                chain.push(chain_start);
++    
++                *last = track_nr;
++                let m = format!("[{filter_type}out{track_nr}]");
++                map.push(m.clone());
++                self.output_map.append(&mut vec_strings!["-map", m]);
+             }
+-
+-            chain_start.push_str(filter);
+-
+-            chain.push(chain_start);
+-
+-            *last = track_nr;
+-            let m = format!("[{filter_type}out{track_nr}]");
+-            map.push(m.clone());
+-            self.output_map.append(&mut vec_strings!["-map", m]);
+         }
+     }
+ 
+     fn build(&mut self) {
+         for (i, filter) in self.a_chain.iter().enumerate() {
+-            if i > 0 && i < self.a_chain.len() && !filter.starts_with("[") {
+-                self.audio_chain.push(',');
++            if let Some(filter_str) = Some(filter.as_str()) {
++                if i > 0 && i < self.a_chain.len() && !filter_str.starts_with("[") {
++                    self.audio_chain.push(',');
++                }
++    
++                self.audio_chain.push_str(filter_str);
++    
++                if filter_str.ends_with("]") && i < self.a_chain.len() - 1 {
++                    self.audio_chain.push(';');
++                }
+             }
+-
+-            self.audio_chain.push_str(filter);
+         }
+-
++    
+         for (i, filter) in self.v_chain.iter().enumerate() {
+-            if filter.starts_with("movie=") {
+-                if self.hw_context
+-                    && !last_is_hw(&self.video_chain)
+-                    && !self.config.advanced.is_empty_filter()
+-                {
+-                    let hw_up = hw_upload_str(&self.config);
+-
++            if let Some(filter_str) = Some(filter.as_str()) {
++                if filter_str.starts_with("movie=") {
++                    if self.hw_context
++                        && !last_is_hw(&self.video_chain)
++                        && !self.config.advanced.is_empty_filter()
++                    {
++                        let hw_up = hw_upload_str(&self.config);
++    
++                        self.video_chain.push(',');
++                        self.video_chain.push_str(&hw_up);
++                    }
++                    if !filter_str.contains("]") {
++                        self.video_chain.push_str("[v];");
++                    }
++                } else if filter_str.starts_with("overlay") {
++                    let hw_up = hw_upload(&self.config, &self.video_chain, filter_str);
++    
++                    if !hw_up.is_empty() {
++                        self.video_chain.push(',');
++                        self.video_chain.push_str(&hw_up);
++                    }
++    
++                    self.video_chain.push_str("[l];[v][l]");
++                } else if i > 0 && i < self.v_chain.len() && !filter_str.starts_with("[") {
+                     self.video_chain.push(',');
+-                    self.video_chain.push_str(&hw_up);
++    
++                    let hw_dl = hw_download(&self.video_chain, filter_str);
++                    let hw_ul = hw_upload(&self.config, &self.video_chain, filter_str);
++    
++                    if (!hw_dl.is_empty() || !hw_ul.is_empty())
++                        && !filter_str.starts_with("movie=")
++                        && !filter_str.starts_with("overlay")
++                    {
++                        self.video_chain.push_str(&hw_dl);
++                        self.video_chain.push_str(&hw_ul);
++                        self.video_chain.push(',');
++                    }
+                 }
+-                self.video_chain.push_str("[v];");
+-            } else if filter.starts_with("overlay") {
+-                let hw_up = hw_upload(&self.config, &self.video_chain, filter);
+-
+-                if !hw_up.is_empty() {
+-                    self.video_chain.push(',');
+-                    self.video_chain.push_str(&hw_up);
+-                }
+-
+-                self.video_chain.push_str("[l];[v][l]");
+-            } else if i > 0 && i < self.v_chain.len() && !filter.starts_with("[") {
+-                self.video_chain.push(',');
+-
+-                let hw_dl = hw_download(&self.video_chain, filter);
+-                let hw_ul = hw_upload(&self.config, &self.video_chain, filter);
+-
+-                if (!hw_dl.is_empty() || !hw_ul.is_empty())
+-                    && !filter.starts_with("movie=")
+-                    && !filter.starts_with("overlay")
+-                {
+-                    self.video_chain.push_str(&hw_dl);
+-                    self.video_chain.push_str(&hw_ul);
+-                    self.video_chain.push(',');
++    
++                self.video_chain.push_str(filter_str);
++                if filter_str.ends_with("]") && i < self.v_chain.len() - 1 {
++                    self.video_chain.push(';');
+                 }
+             }
+-
+-            self.video_chain.push_str(filter);
+         }
+     }
+ 
+@@ -308,7 +324,7 @@ fn hw_download(chain: &str, f: &str) -> String {
+     {
+         filter = "hwdownload".to_string();
+ 
+-        if !chain.contains("_cuda") {
++        if !chain.contains("_cuda") || !chain.contains("_npp") {
+             filter.push_str(",format=nv12");
+         }
+     }
+@@ -333,7 +349,7 @@ fn hw_upload_str(config: &PlayoutConfig) -> String {
+ fn hw_upload(config: &PlayoutConfig, chain: &str, f: &str) -> String {
+     let mut filter = String::new();
+ 
+-    if !last_is_hw(chain) && is_hw(f) && !f.contains("hwdownload") && !f.contains("hwupload") {
++    if !last_is_hw(chain) && is_hw(f) && !f.contains("hwdownload") && !f.contains("hwupload") && !f.contains("hwupload_cuda") {
+         filter = hw_upload_str(config);
+     }
+ 
+@@ -344,74 +360,86 @@ fn deinterlace(config: &PlayoutConfig, chain: &mut Filters, field_order: &Option
+     if let Some(order) = field_order {
+         if order != "progressive" {
+             let deinterlace = match config.advanced.filter.deinterlace.clone() {
+-                Some(deinterlace) => deinterlace,
+-                None => "yadif=0:-1:0".to_string(),
++                FilterValue::Some(deinterlace) => Some(deinterlace.clone()),
++                FilterValue::None => Some("yadif=0:-1:0".to_string()),
++                FilterValue::Null => None,
+             };
+ 
+-            chain.add(&deinterlace, 0, Video);
++            chain.add(deinterlace.as_deref(), 0, Video);
+         }
+     }
+ }
+ 
+ fn pad(config: &PlayoutConfig, chain: &mut Filters, aspect: f64) {
+-    if !is_close(aspect, config.processing.aspect, 0.03) {
+-        let (numerator, denominator) = fraction(config.processing.aspect, 100);
+-
+-        let pad = match config.advanced.filter.pad_video.clone() {
+-            Some(pad_video) => custom_format(
+-                &pad_video,
++    let pad = match &config.advanced.filter.pad_video {
++        FilterValue::Some(pad_video) => {
++            let (numerator, denominator) = fraction(config.processing.aspect, 100);
++            Some(custom_format(
++                pad_video,
+                 &[&numerator.to_string(), &denominator.to_string()],
+-            ),
+-            None => format!("pad='ih*{numerator}/{denominator}:ih:(ow-iw)/2:(oh-ih)/2'"),
+-        };
++            ))
++        },
++        FilterValue::None => {
++            if !is_close(aspect, config.processing.aspect, 0.03) {
++                let (numerator, denominator) = fraction(config.processing.aspect, 100);
++                Some(format!("pad='ih*{numerator}/{denominator}:ih:(ow-iw)/2:(oh-ih)/2'"))
++            } else {
++                None
++            }
++        },
++        FilterValue::Null => None,
++    };
+ 
+-        chain.add(&pad, 0, Video);
+-    }
++    chain.add(pad.as_deref(), 0, Video);
+ }
+ 
+ fn fps(config: &PlayoutConfig, chain: &mut Filters, fps: f64) {
+     if fps != config.processing.fps {
+         let fps_filter = match config.advanced.filter.fps.clone() {
+-            Some(fps) => custom_format(&fps, &[&config.processing.fps]),
+-            None => format!("fps={}", config.processing.fps),
++            FilterValue::Some(fps) => Some(custom_format(&fps, &[&config.processing.fps.to_string()])),
++            FilterValue::None => Some(format!("fps={}", config.processing.fps)),
++            FilterValue::Null => None,
+         };
+ 
+-        chain.add(&fps_filter, 0, Video);
++        chain.add(fps_filter.as_deref(), 0, Video);
+     }
+ }
+ 
+ fn scale(config: &PlayoutConfig, chain: &mut Filters, width: Option<i64>, height: Option<i64>) {
+-    if let Some(scale) = &config.advanced.filter.scale {
+-        chain.add(
+-            &custom_format(
+-                scale,
+-                &[&config.processing.width, &config.processing.height],
+-            ),
+-            0,
+-            Video,
+-        );
+-    } else if width.is_some_and(|w| w != config.processing.width)
+-        || height.is_some_and(|w| w != config.processing.height)
+-    {
+-        chain.add(
+-            &format!(
+-                "scale={}:{}",
+-                config.processing.width, config.processing.height
+-            ),
+-            0,
+-            Video,
+-        );
+-    }
++    match config.advanced.filter.scale.clone() {
++        FilterValue::Some(scale) => {
++            let formatted = custom_format(
++                &scale,
++                &[&config.processing.width.to_string(), &config.processing.height.to_string()],
++            );
++            chain.add(Some(&formatted), 0, Video);
++            Some(())
++        },
++        FilterValue::None => {
++            if width.is_some_and(|w| w != config.processing.width)
++                || height.is_some_and(|w| w != config.processing.height)
++            {
++                let formatted = format!(
++                    "scale={}:{}",
++                    config.processing.width, config.processing.height
++                );
++                chain.add(Some(&formatted), 0, Video);
++            }
++            Some(())
++        },
++        FilterValue::Null => None,
++    };
+ }
+ 
+ fn setdar(config: &PlayoutConfig, chain: &mut Filters, aspect: f64) {
+     if !is_close(aspect, config.processing.aspect, 0.03) {
+         let dar = match config.advanced.filter.set_dar.clone() {
+-            Some(set_dar) => custom_format(&set_dar, &[&config.processing.aspect]),
+-            None => format!("setdar=dar={}", config.processing.aspect),
++            FilterValue::Some(set_dar) => Some(custom_format(&set_dar, &[&config.processing.aspect.to_string()])),
++            FilterValue::None => Some(format!("setdar=dar={}", config.processing.aspect)),
++            FilterValue::Null => None,
+         };
+ 
+-        chain.add(&dar, 0, Video);
++        chain.add(dar.as_deref(), 0, Video);
+     }
+ }
+ 
+@@ -434,31 +462,40 @@ fn fade(
+     }
+ 
+     if node.seek > 0.0 || node.unit == Ingest {
+-        let mut fade_in = format!("{t}fade=in:st=0:d=0.5");
+-
+-        if t == "a" {
+-            if let Some(fade) = &config.advanced.filter.afade_in {
+-                fade_in = custom_format(fade, &[t]);
++        let fade_in = if t == "a" {
++            match &config.advanced.filter.afade_in {
++                FilterValue::Some(fade) => Some(custom_format(fade, &[t])),
++                FilterValue::None => Some(format!("{t}fade=in:st=0:d=0.5")),
++                FilterValue::Null => None,
++            }
++        } else {
++            match &config.advanced.filter.fade_in {
++                FilterValue::Some(fade) => Some(custom_format(fade, &[t])),
++                FilterValue::None => Some(format!("{t}fade=in:st=0:d=0.5")),
++                FilterValue::Null => None,
+             }
+-        } else if let Some(fade) = &config.advanced.filter.fade_in {
+-            fade_in = custom_format(fade, &[t]);
+         };
+ 
+-        chain.add(&fade_in, nr, filter_type);
++        chain.add(fade_in.as_deref(), nr, filter_type);
+     }
+ 
+     if (node.out != node.duration && node.out - node.seek > 1.0) || fade_audio {
+-        let mut fade_out = format!("{t}fade=out:st={}:d=1.0", (node.out - node.seek - 1.0));
+-
+-        if t == "a" {
+-            if let Some(fade) = &config.advanced.filter.afade_out {
+-                fade_out = custom_format(fade, &[node.out - node.seek - 1.0]);
++        let out_time = node.out - node.seek - 1.0;
++        let fade_out = if t == "a" {
++            match &config.advanced.filter.afade_out {
++                FilterValue::Some(fade) => Some(custom_format(fade, &[&out_time.to_string()])),
++                FilterValue::None => Some(format!("{t}fade=out:st={out_time}:d=1.0")),
++                FilterValue::Null => None,
++            }
++        } else {
++            match &config.advanced.filter.fade_out {
++                FilterValue::Some(fade) => Some(custom_format(fade, &[&out_time.to_string()])),
++                FilterValue::None => Some(format!("{t}fade=out:st={out_time}:d=1.0")),
++                FilterValue::Null => None,
+             }
+-        } else if let Some(fade) = &config.advanced.filter.fade_out {
+-            fade_out = custom_format(fade, &[node.out - node.seek - 1.0]);
+         };
+ 
+-        chain.add(&fade_out, nr, filter_type);
++        chain.add(fade_out.as_deref(), nr, filter_type);
+     }
+ }
+ 
+@@ -473,53 +510,59 @@ fn overlay(config: &PlayoutConfig, chain: &mut Filters, node: &mut Media) {
+             .replace('\\', "/")
+             .replace(':', "\\\\:");
+ 
++        // Movie filter
+         let movie = match &config.advanced.filter.logo {
+-            Some(logo) => {
+-                custom_format(logo, &[logo_path, config.processing.logo_opacity.to_string()])
+-        },
+-            None => format!(
++            FilterValue::Some(logo) => {
++                Some(custom_format(logo, &[logo_path.clone(), config.processing.logo_opacity.to_string()]))
++            },
++            FilterValue::None => Some(format!(
+                 "movie={logo_path}:loop=0,setpts=N/(FRAME_RATE*TB),format=rgba,colorchannelmixer=aa={}",
+-                config.processing.logo_opacity,
++                config.processing.logo_opacity),
+             ),
++            FilterValue::Null => None,
+         };
+ 
+-        chain.add(&movie, 0, Video);
++        chain.add(movie.as_deref(), 0, Video);
+ 
+         if node.last_ad {
+             let fade_in = match config.advanced.filter.overlay_logo_fade_in.clone() {
+-                Some(fade_in) => fade_in,
+-                None => "fade=in:st=0:d=1.0:alpha=1".to_string(),
++                FilterValue::Some(fade_in) => Some(fade_in.clone()),
++                FilterValue::None => Some("fade=in:st=0:d=1.0:alpha=1".to_string()),
++                FilterValue::Null => None,
+             };
+ 
+-            chain.add(&fade_in, 0, Video);
++            chain.add(fade_in.as_deref(), 0, Video);
+         }
+ 
+         if node.next_ad {
+             let length = node.out - node.seek - 1.0;
+ 
+             let fade_out = match &config.advanced.filter.overlay_logo_fade_out {
+-                Some(fade_out) => custom_format(fade_out, &[length]),
+-                None => format!("fade=out:st={length}:d=1.0:alpha=1"),
++                FilterValue::Some(fade_out) => Some(custom_format(fade_out, &[&length.to_string()])),
++                FilterValue::None => Some(format!("fade=out:st={length}:d=1.0:alpha=1")),
++                FilterValue::Null => None,
+             };
+ 
+-            chain.add(&fade_out, 0, Video);
++            chain.add(fade_out.as_deref(), 0, Video);
+         }
+ 
+         if !config.processing.logo_scale.is_empty() {
+             let scale = match &config.advanced.filter.overlay_logo_scale {
+-                Some(logo_scale) => custom_format(logo_scale, &[&config.processing.logo_scale]),
+-                None => format!("scale={}", config.processing.logo_scale),
++                FilterValue::Some(logo_scale) => Some(custom_format(logo_scale, &[&config.processing.logo_scale])),
++                FilterValue::None => Some(format!("scale={}", config.processing.logo_scale)),
++                FilterValue::Null => None,
+             };
+ 
+-            chain.add(&scale, 0, Video);
++            chain.add(scale.as_deref(), 0, Video);
+         }
+ 
+         let overlay = match &config.advanced.filter.overlay_logo {
+-            Some(ov) => custom_format(ov, &[&config.processing.logo_position]),
+-            None => format!("overlay={}:shortest=1", config.processing.logo_position),
++            FilterValue::Some(ov) => Some(custom_format(ov, &[&config.processing.logo_position])),
++            FilterValue::None => Some(format!("overlay={}:shortest=1", config.processing.logo_position)),
++            FilterValue::Null => None,
+         };
+ 
+-        chain.add(&overlay, 0, Video);
++        chain.add(overlay.as_deref(), 0, Video);
+     }
+ }
+ 
+@@ -534,11 +577,12 @@ fn extend_video(config: &PlayoutConfig, chain: &mut Filters, node: &mut Media) {
+             let duration = (node.out - node.seek) - (video_duration - node.seek);
+ 
+             let tpad = match config.advanced.filter.tpad.clone() {
+-                Some(pad) => custom_format(&pad, &[duration]),
+-                None => format!("tpad=stop_mode=add:stop_duration={duration}"),
++                FilterValue::Some(pad) => Some(custom_format(&pad, &[&duration.to_string()])),
++                FilterValue::None => Some(format!("tpad=stop_mode=add:stop_duration={duration}")),
++                FilterValue::Null => None,
+             };
+ 
+-            chain.add(&tpad, 0, Video);
++            chain.add(tpad.as_deref(), 0, Video);
+         }
+     }
+ }
+@@ -554,21 +598,24 @@ async fn add_text(
+         && (config.text.text_from_filename || config.output.mode == HLS || node.unit == Encoder)
+     {
+         let filter = v_drawtext::filter_node(config, Some(node), filter_chain).await;
+-
+-        chain.add(&filter, 0, Video);
++        
++        if !filter.is_empty() {
++            chain.add(Some(&filter), 0, Video);
++        }
+     }
+ }
+ 
+ fn add_audio(config: &PlayoutConfig, chain: &mut Filters, node: &Media, nr: i32) {
+     let audio = match config.advanced.filter.aevalsrc.clone() {
+-        Some(aevalsrc) => custom_format(&aevalsrc, &[node.out - node.seek]),
+-        None => format!(
++        FilterValue::Some(aevalsrc) => Some(custom_format(&aevalsrc, &[node.out - node.seek])),
++        FilterValue::None => Some(format!(
+             "aevalsrc=0:channel_layout=stereo:duration={}:sample_rate=48000",
+             node.out - node.seek
+-        ),
++        )),
++        FilterValue::Null => None,
+     };
+ 
+-    chain.add(&audio, nr, Audio);
++    chain.add(audio.as_deref(), nr, Audio);
+ }
+ 
+ fn extend_audio(config: &PlayoutConfig, chain: &mut Filters, node: &mut Media, nr: i32) {
+@@ -582,11 +629,12 @@ fn extend_audio(config: &PlayoutConfig, chain: &mut Filters, node: &mut Media, n
+             if node.out - node.seek > audio_duration - node.seek + 0.1 && node.duration >= node.out
+             {
+                 let apad = match config.advanced.filter.apad.clone() {
+-                    Some(apad) => custom_format(&apad, &[node.out - node.seek]),
+-                    None => format!("apad=whole_dur={}", node.out - node.seek),
++                    FilterValue::Some(apad) => Some(custom_format(&apad, &[node.out - node.seek])),
++                    FilterValue::None => Some(format!("apad=whole_dur={}", node.out - node.seek)),
++                    FilterValue::Null => None,
+                 };
+ 
+-                chain.add(&apad, nr, Audio);
++                chain.add(apad.as_deref(), nr, Audio);
+             }
+         }
+     }
+@@ -595,11 +643,12 @@ fn extend_audio(config: &PlayoutConfig, chain: &mut Filters, node: &mut Media, n
+ fn audio_volume(config: &PlayoutConfig, chain: &mut Filters, nr: i32) {
+     if config.processing.volume != 1.0 {
+         let volume = match config.advanced.filter.volume.clone() {
+-            Some(volume) => custom_format(&volume, &[config.processing.volume]),
+-            None => format!("volume={}", config.processing.volume),
++            FilterValue::Some(volume) => Some(custom_format(&volume, &[config.processing.volume])),
++            FilterValue::None => Some(format!("volume={}", config.processing.volume)),
++            FilterValue::Null => None,
+         };
+ 
+-        chain.add(&volume, nr, Audio);
++        chain.add(volume.as_deref(), nr, Audio);
+     }
+ }
+ 
+@@ -620,11 +669,12 @@ pub fn split_filter(config: &PlayoutConfig, chain: &mut Filters, nr: i32, filter
+         }
+ 
+         let split = match config.advanced.filter.split.clone() {
+-            Some(split) => custom_format(&split, &[count.to_string(), out_link.join("")]),
+-            None => format!("split={count}{}", out_link.join("")),
++            FilterValue::Some(split) => Some(custom_format(&split, &[count.to_string(), out_link.join("")])),
++            FilterValue::None => Some(format!("split={count}{}", out_link.join(""))),
++            FilterValue::Null => None,
+         };
+ 
+-        chain.add(&split, nr, filter_type);
++        chain.add(split.as_deref(), nr, filter_type);
+     }
+ }
+ 
+@@ -667,7 +717,7 @@ fn process_output_filters(config: &PlayoutConfig, chain: &mut Filters, output_fi
+ 
+ fn custom(filter: &str, chain: &mut Filters, nr: i32, filter_type: FilterType) {
+     if !filter.is_empty() {
+-        chain.add(filter, nr, filter_type);
++        chain.add(Some(filter), nr, filter_type);
+     }
+ }
+ 
+@@ -781,7 +831,7 @@ pub async fn filter_chains(
+ 
+             // add at least anull filter, for correct filter construction,
+             // is important for split filter in HLS mode
+-            filters.add("anull", i, Audio);
++            filters.add(Some("anull"), i, Audio);
+ 
+             fade(config, &mut filters, node, i, Audio);
+             audio_volume(config, &mut filters, i);
+diff --git a/engine/src/player/filter/v_drawtext.rs b/engine/src/player/filter/v_drawtext.rs
+index 5a29b075..a454ab22 100644
+--- a/engine/src/player/filter/v_drawtext.rs
++++ b/engine/src/player/filter/v_drawtext.rs
+@@ -7,7 +7,10 @@ use crate::player::{
+     controller::ProcessUnit::*,
+     utils::{custom_format, Media},
+ };
+-use crate::utils::config::PlayoutConfig;
++use crate::utils::{
++    config::PlayoutConfig,
++    advanced_config::FilterValue,
++};
+ 
+ pub async fn filter_node(
+     config: &PlayoutConfig,
+@@ -46,8 +49,9 @@ pub async fn filter_node(
+             .replace(':', "\\:");
+ 
+         filter = match &config.advanced.filter.drawtext_from_file {
+-            Some(drawtext) => custom_format(drawtext, &[&escaped_text, &config.text.style, &font]),
+-            None => format!("drawtext=text='{escaped_text}':{}{font}", config.text.style),
++            FilterValue::Some(drawtext) => custom_format(drawtext, &[&escaped_text, &config.text.style, &font]),
++            FilterValue::None => format!("drawtext=text='{escaped_text}':{}{font}", config.text.style),
++            FilterValue::Null => String::new()
+         };
+     } else if let Some(socket) = zmq_socket {
+         let mut filter_cmd = format!("text=''{font}");
+@@ -59,11 +63,12 @@ pub async fn filter_node(
+         }
+ 
+         filter = match config.advanced.filter.drawtext_from_zmq.clone() {
+-            Some(drawtext) => custom_format(&drawtext, &[&socket.replace(':', "\\:"), &filter_cmd]),
+-            None => format!(
++            FilterValue::Some(drawtext) => custom_format(&drawtext, &[&socket.replace(':', "\\:"), &filter_cmd]),
++            FilterValue::None => format!(
+                 "zmq=b=tcp\\\\://'{}',drawtext@dyntext={filter_cmd}",
+                 socket.replace(':', "\\:")
+             ),
++            FilterValue::Null => String::new()
+         };
+     }
+ 
+diff --git a/engine/src/player/utils/json_validate.rs b/engine/src/player/utils/json_validate.rs
+index da511a8c..650a0916 100644
+--- a/engine/src/player/utils/json_validate.rs
++++ b/engine/src/player/utils/json_validate.rs
+@@ -86,7 +86,7 @@ async fn check_media(
+             .to_string();
+     }
+ 
+-    filter.add("silencedetect=n=-30dB", 0, Audio);
++    filter.add(Some("silencedetect=n=-30dB"), 0, Audio);
+ 
+     dec_cmd.append(&mut node.cmd.unwrap_or_default());
+     dec_cmd.append(&mut filter.cmd());
+diff --git a/engine/src/player/utils/mod.rs b/engine/src/player/utils/mod.rs
+index 47e5fbfc..06e56190 100644
+--- a/engine/src/player/utils/mod.rs
++++ b/engine/src/player/utils/mod.rs
+@@ -1123,9 +1123,14 @@ pub fn parse_log_level_filter(s: &str) -> Result<LevelFilter, &'static str> {
+ }
+ 
+ pub fn custom_format<T: fmt::Display>(template: &str, args: &[T]) -> String {
++    if args.is_empty() || !template.contains('{') {
++        return template.to_string();
++    }
++
+     let mut filled_template = String::new();
+     let mut arg_iter = args.iter().map(T::to_string);
+     let mut template_iter = template.chars();
++    let mut found_placeholder = false;
+ 
+     while let Some(c) = template_iter.next() {
+         if c == '{' {
+@@ -1135,12 +1140,19 @@ pub fn custom_format<T: fmt::Display>(template: &str, args: &[T]) -> String {
+                 } else if nc == '}' {
+                     if let Some(arg) = arg_iter.next() {
+                         filled_template.push_str(&arg);
++                        found_placeholder = true;
+                     } else {
+                         filled_template.push(c);
+                         filled_template.push(nc);
+                     }
+                 } else if let Some(n) = nc.to_digit(10) {
+-                    filled_template.push_str(&args[n as usize].to_string());
++                    if n < args.len() as u32 {
++                        filled_template.push_str(&args[n as usize].to_string());
++                        found_placeholder = true;
++                    } else {
++                        filled_template.push(c);
++                        filled_template.push(nc);
++                    }
+                 } else {
+                     filled_template.push(nc);
+                 }
+@@ -1158,6 +1170,10 @@ pub fn custom_format<T: fmt::Display>(template: &str, args: &[T]) -> String {
+         }
+     }
+ 
++    if !found_placeholder {
++        return template.to_string();
++    }
++
+     filled_template
+ }
+ 
+diff --git a/engine/src/utils/advanced_config.rs b/engine/src/utils/advanced_config.rs
+index 0e79cd72..7e2be8ac 100644
+--- a/engine/src/utils/advanced_config.rs
++++ b/engine/src/utils/advanced_config.rs
+@@ -1,15 +1,106 @@
+ use std::path::Path;
+ 
+-use serde::{Deserialize, Serialize};
++use serde::{self, Deserialize, Deserializer, Serialize, Serializer};
+ use serde_with::{serde_as, NoneAsEmptyString};
+ use shlex::split;
+-use sqlx::{Pool, Sqlite};
++use sqlx::{decode::Decode, encode::IsNull, sqlite::SqliteArgumentValue, Encode, Sqlite, Pool, Type};
++use std::error::Error as StdError;
+ use tokio::io::AsyncReadExt;
+ use ts_rs::TS;
+ 
+ use crate::db::{handles, models::AdvancedConfiguration};
+ use crate::utils::ServiceError;
+ 
++#[derive(Debug, Clone, TS, PartialEq)]
++pub enum FilterValue {
++    Some(String),
++    Null,
++    None,
++}
++
++impl Default for FilterValue {
++    fn default() -> Self {
++        FilterValue::None
++    }
++}
++
++impl<'de> Deserialize<'de> for FilterValue {
++    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
++    where
++        D: Deserializer<'de>,
++    {
++        let opt = Option::<String>::deserialize(deserializer)?;
++        Ok(match opt {
++            Some(s) if s.trim().is_empty() => FilterValue::None,
++            Some(s) if s.to_lowercase() == "null" => FilterValue::Null,
++            Some(s) => FilterValue::Some(s),
++            None => FilterValue::None,
++        })
++    }
++}
++
++impl Serialize for FilterValue {
++    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
++    where
++        S: Serializer,
++    {
++        match self {
++            FilterValue::Some(s) => Some(s).serialize(serializer),
++            FilterValue::Null => Some("null").serialize(serializer),
++            FilterValue::None => None::<String>.serialize(serializer),
++        }
++    }
++}
++
++impl FilterValue {
++    pub fn is_none(&self) -> bool {
++        matches!(self, FilterValue::None)
++    }
++
++    pub fn is_null(&self) -> bool {
++        matches!(self, FilterValue::Null)
++    }
++
++    pub fn is_some(&self) -> bool {
++        matches!(self, FilterValue::Some(_))
++    }
++
++    pub fn as_ref(&self) -> Option<&str> {
++        match self {
++            FilterValue::Some(s) => Some(s),
++            _ => None,
++        }
++    }
++}
++
++impl Type<Sqlite> for FilterValue {
++    fn type_info() -> <Sqlite as sqlx::Database>::TypeInfo {
++        <Option<String> as Type<Sqlite>>::type_info()
++    }
++}
++
++impl<'q> Encode<'q, Sqlite> for FilterValue {
++    fn encode_by_ref(&self, buf: &mut Vec<SqliteArgumentValue<'q>>) -> Result<IsNull, Box<dyn StdError + Send + Sync>> {
++        match self {
++            FilterValue::Some(s) => <Option<String> as Encode<Sqlite>>::encode_by_ref(&Some(s.clone()), buf),
++            FilterValue::Null => <Option<String> as Encode<Sqlite>>::encode_by_ref(&Some("null".to_string()), buf),
++            FilterValue::None => <Option<String> as Encode<Sqlite>>::encode_by_ref(&None, buf),
++        }
++    }
++}
++
++impl<'r> Decode<'r, Sqlite> for FilterValue {
++    fn decode(value: <Sqlite as sqlx::database::Database>::ValueRef<'r>) -> Result<Self, Box<dyn StdError + Send + Sync>> {
++        let value = <Option<String> as Decode<Sqlite>>::decode(value)?;
++        Ok(match value {
++            Some(s) if s.trim().is_empty() => FilterValue::None,
++            Some(s) if s.to_lowercase() == "null" => FilterValue::Null,
++            Some(s) => FilterValue::Some(s),
++            None => FilterValue::None,
++        })
++    }
++}
++
+ #[derive(Debug, Default, Serialize, Deserialize, Clone, TS)]
+ #[ts(export, export_to = "advanced_config.d.ts")]
+ pub struct AdvancedConfig {
+@@ -63,77 +154,85 @@ pub struct IngestConfig {
+     pub input_cmd: Option<Vec<String>>,
+ }
+ 
+-#[serde_as]
+ #[derive(Debug, Default, Serialize, Deserialize, Clone, TS)]
+ #[ts(export, export_to = "advanced_config.d.ts")]
+ pub struct FilterConfig {
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub deinterlace: Option<String>,
++    #[serde(default)]
++    pub deinterlace: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub pad_video: Option<String>,
++    #[serde(default)]
++    pub pad_video: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub fps: Option<String>,
++    #[serde(default)]
++    pub fps: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub scale: Option<String>,
++    #[serde(default)]
++    pub scale: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub set_dar: Option<String>,
++    #[serde(default)]
++    pub set_dar: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub fade_in: Option<String>,
++    #[serde(default)]
++    pub fade_in: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub fade_out: Option<String>,
++    #[serde(default)]
++    pub fade_out: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub logo: Option<String>,
++    #[serde(default)]
++    pub logo: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub overlay_logo_scale: Option<String>,
++    #[serde(default)]
++    pub overlay_logo_scale: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub overlay_logo_fade_in: Option<String>,
++    #[serde(default)]
++    pub overlay_logo_fade_in: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub overlay_logo_fade_out: Option<String>,
++    #[serde(default)]
++    pub overlay_logo_fade_out: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub overlay_logo: Option<String>,
++    #[serde(default)]
++    pub overlay_logo: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub tpad: Option<String>,
++    #[serde(default)]
++    pub tpad: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub drawtext_from_file: Option<String>,
++    #[serde(default)]
++    pub drawtext_from_file: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub drawtext_from_zmq: Option<String>,
++    #[serde(default)]
++    pub drawtext_from_zmq: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub aevalsrc: Option<String>,
++    #[serde(default)]
++    pub aevalsrc: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub afade_in: Option<String>,
++    #[serde(default)]
++    pub afade_in: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub afade_out: Option<String>,
++    #[serde(default)]
++    pub afade_out: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub apad: Option<String>,
++    #[serde(default)]
++    pub apad: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub volume: Option<String>,
++    #[serde(default)]
++    pub volume: FilterValue,
+     #[ts(type = "string")]
+-    #[serde_as(as = "NoneAsEmptyString")]
+-    pub split: Option<String>,
++    #[serde(default)]
++    pub split: FilterValue,
+ }
+ 
+ impl AdvancedConfig {
+     pub fn new(config: AdvancedConfiguration) -> Self {
++        fn to_filter_value(opt: Option<String>) -> FilterValue {
++            match opt {
++                Some(s) if s.trim().is_empty() => FilterValue::None,
++                Some(s) if s.to_lowercase() == "null" => FilterValue::Null,
++                Some(s) => FilterValue::Some(s),
++                None => FilterValue::None,
++            }
++        }
++
+         Self {
+             id: config.id,
+             name: config.name,
+@@ -157,27 +256,27 @@ impl AdvancedConfig {
+                 },
+             },
+             filter: FilterConfig {
+-                deinterlace: config.filter_deinterlace,
+-                pad_video: config.filter_pad_video,
+-                fps: config.filter_fps,
+-                scale: config.filter_scale,
+-                set_dar: config.filter_set_dar,
+-                fade_in: config.filter_fade_in,
+-                fade_out: config.filter_fade_out,
+-                logo: config.filter_logo,
+-                overlay_logo_scale: config.filter_overlay_logo_scale,
+-                overlay_logo_fade_in: config.filter_overlay_logo_fade_in,
+-                overlay_logo_fade_out: config.filter_overlay_logo_fade_out,
+-                overlay_logo: config.filter_overlay_logo,
+-                tpad: config.filter_tpad,
+-                drawtext_from_file: config.filter_drawtext_from_file,
+-                drawtext_from_zmq: config.filter_drawtext_from_zmq,
+-                aevalsrc: config.filter_aevalsrc,
+-                afade_in: config.filter_afade_in,
+-                afade_out: config.filter_afade_out,
+-                apad: config.filter_apad,
+-                volume: config.filter_volume,
+-                split: config.filter_split,
++                deinterlace: to_filter_value(config.filter_deinterlace),
++                pad_video: to_filter_value(config.filter_pad_video),
++                fps: to_filter_value(config.filter_fps),
++                scale: to_filter_value(config.filter_scale),
++                set_dar: to_filter_value(config.filter_set_dar),
++                fade_in: to_filter_value(config.filter_fade_in),
++                fade_out: to_filter_value(config.filter_fade_out),
++                logo: to_filter_value(config.filter_logo),
++                overlay_logo_scale: to_filter_value(config.filter_overlay_logo_scale),
++                overlay_logo_fade_in: to_filter_value(config.filter_overlay_logo_fade_in),
++                overlay_logo_fade_out: to_filter_value(config.filter_overlay_logo_fade_out),
++                overlay_logo: to_filter_value(config.filter_overlay_logo),
++                tpad: to_filter_value(config.filter_tpad),
++                drawtext_from_file: to_filter_value(config.filter_drawtext_from_file),
++                drawtext_from_zmq: to_filter_value(config.filter_drawtext_from_zmq),
++                aevalsrc: to_filter_value(config.filter_aevalsrc),
++                afade_in: to_filter_value(config.filter_afade_in),
++                afade_out: to_filter_value(config.filter_afade_out),
++                apad: to_filter_value(config.filter_apad),
++                volume: to_filter_value(config.filter_volume),
++                split: to_filter_value(config.filter_split),
+             },
+             ingest: IngestConfig {
+                 input_param: config.ingest_input_param.clone(),
+diff --git a/engine/src/utils/channels.rs b/engine/src/utils/channels.rs
+index 5ff53540..36899abe 100644
+--- a/engine/src/utils/channels.rs
++++ b/engine/src/utils/channels.rs
+@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
+ use crate::db::{handles, models::Channel};
+ use crate::player::controller::{ChannelController, ChannelManager};
+ use crate::utils::{
+-    advanced_config::{AdvancedConfig, DecoderConfig, FilterConfig, IngestConfig},
++    advanced_config::{AdvancedConfig, DecoderConfig, FilterConfig, IngestConfig, FilterValue},
+     config::get_config,
+     copy_assets,
+     errors::ServiceError,
+@@ -88,10 +88,10 @@ pub async fn create_channel(
+                 ..Default::default()
+             },
+             filter: FilterConfig {
+-                deinterlace: Some(NVIDIA_FILTER_DEINTERLACE.to_string()),
+-                scale: Some(NVIDIA_FILTER_SCALE.to_string()),
+-                overlay_logo_scale: Some(NVIDIA_FILTER_LOGO_SCALE.to_string()),
+-                overlay_logo: Some(NVIDIA_FILTER_OVERLAY.to_string()),
++                deinterlace: FilterValue::Some(NVIDIA_FILTER_DEINTERLACE.to_string()),
++                scale: FilterValue::Some(NVIDIA_FILTER_SCALE.to_string()),
++                overlay_logo_scale: FilterValue::Some(NVIDIA_FILTER_LOGO_SCALE.to_string()),
++                overlay_logo: FilterValue::Some(NVIDIA_FILTER_OVERLAY.to_string()),
+                 ..Default::default()
+             },
+             ..Default::default()
+@@ -114,11 +114,11 @@ pub async fn create_channel(
+                 ..Default::default()
+             },
+             filter: FilterConfig {
+-                deinterlace: Some(QSV_FILTER_DEINTERLACE.to_string()),
+-                fps: Some(QSV_FILTER_FPS.to_string()),
+-                scale: Some(QSV_FILTER_SCALE.to_string()),
+-                overlay_logo_scale: Some(QSV_FILTER_LOGO_SCALE.to_string()),
+-                overlay_logo: Some(QSV_FILTER_OVERLAY.to_string()),
++                deinterlace: FilterValue::Some(QSV_FILTER_DEINTERLACE.to_string()),
++                fps: FilterValue::Some(QSV_FILTER_FPS.to_string()),
++                scale: FilterValue::Some(QSV_FILTER_SCALE.to_string()),
++                overlay_logo_scale: FilterValue::Some(QSV_FILTER_LOGO_SCALE.to_string()),
++                overlay_logo: FilterValue::Some(QSV_FILTER_OVERLAY.to_string()),
+                 ..Default::default()
+             },
+             ..Default::default()

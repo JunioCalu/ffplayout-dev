@@ -1,3 +1,72 @@
+// INÍCIO METADADOS CLAUDE
+// Esse é o arquivo '/engine/src/main.rs que eu estou numerando como arquivo número 11'
+// Informações adicionais:
+// - Tamanho sem o cabeçalho Claude: 10281 bytes
+// - Número de linhas sem o cabeçalho Claude: 279
+// - Status Git: Modified (modificado mas não adicionado ao staging)
+// - Branch atual: skip_clip_on_cuda_decoder_error
+// - Última modificação: Tue Feb 11 12:43:28 2025 +0100
+// - Possível propósito: Acesso a dados, API/Web, Ponto de entrada, Processamento de mídia
+//
+// RESUMO ESTRUTURAL:
+// --------------------------------------------------
+// Estruturas (structs):
+// - Nenhuma struct definido neste arquivo
+//
+// Enumerações (enums):
+// - Nenhuma enum definido neste arquivo
+//
+// Traits:
+// - Nenhuma trait definida neste arquivo
+//
+// Funções por categoria:
+// Outras funções:
+// - fn thread_counter() -> usize {
+// - async fn main() -> Result<(), ProcessError> {
+//
+// Dependências (imports completos):
+// - use std::{
+//   collections::HashSet,
+//   sync::{atomic::AtomicBool, Arc},
+//   thread,
+//   };
+// - use actix_web::{middleware::Logger, web, App, HttpServer};
+// - use actix_web_httpauth::middleware::HttpAuthentication;
+// - #[cfg(any(debug_assertions, not(feature = "embed_frontend")))]
+//   use actix_files::Files;
+// - #[cfg(all(not(debug_assertions), feature = "embed_frontend"))]
+//   use actix_web_static_files::ResourceFiles;
+// - use log::*;
+// - use tokio::{fs::File, io::AsyncReadExt, sync::Mutex};
+// - use ffplayout::{
+//   api::routes::*,
+//   db::{db_drop, db_pool, handles, init_globales},
+//   player::{
+//   controller::{ChannelController, ChannelManager},
+//   utils::{get_date, is_remote, json_validate::validate_playlist, JsonPlaylist},
+//   },
+//   sse::{broadcast::Broadcaster, routes::*, SseAuthState},
+//   utils::{
+//   args_parse::init_args,
+//   config::get_config,
+//   errors::ProcessError,
+//   logging::init_logging,
+//   mail::{self, MailQueue},
+//   playlist::generate_playlist,
+//   time_machine::set_mock_time,
+//   recovery::ChannelRecoveryState,
+//   },
+//   validator, ARGS,
+//   };
+// - #[cfg(any(debug_assertions, not(feature = "embed_frontend")))]
+//   use ffplayout::utils::public_path;
+// --------------------------------------------------
+//
+// Este comentário foi adicionado automaticamente para facilitar 
+// o entendimento do contexto do projeto por sistemas de IA como o Claude.
+// FIM METADADOS CLAUDE
+//
+
 use std::{
     collections::HashSet,
     sync::{atomic::AtomicBool, Arc},
@@ -32,6 +101,7 @@ use ffplayout::{
         mail::{self, MailQueue},
         playlist::generate_playlist,
         time_machine::set_mock_time,
+        recovery::ChannelRecoveryState,
     },
     validator, ARGS,
 };
@@ -249,6 +319,7 @@ async fn main() -> Result<(), ProcessError> {
                     Arc::new(Mutex::new(Vec::new())),
                     playlist,
                     Arc::new(AtomicBool::new(false)),
+                    Arc::new(ChannelRecoveryState::new()),
                 )
                 .await;
             } else if ARGS.test_mail {

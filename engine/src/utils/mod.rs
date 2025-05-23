@@ -1,3 +1,68 @@
+// INÍCIO METADADOS CLAUDE
+// Esse é o arquivo '/engine/src/utils/mod.rs que eu estou numerando como arquivo número 7'
+// Informações adicionais:
+// - Tamanho sem o cabeçalho Claude: 8693 bytes
+// - Número de linhas sem o cabeçalho Claude: 291
+// - Status Git: Modified (modificado mas não adicionado ao staging)
+// - Branch atual: skip_clip_on_cuda_decoder_error
+// - Última modificação: Tue Feb 11 12:43:28 2025 +0100
+// - Possível propósito: Acesso a dados, Processamento de mídia
+//
+// RESUMO ESTRUTURAL:
+// --------------------------------------------------
+// Estruturas (structs):
+// - pub struct TextFilter {
+//
+// Enumerações (enums):
+// - Nenhuma enum definido neste arquivo
+//
+// Traits:
+// - Nenhuma trait definida neste arquivo
+//
+// Funções por categoria:
+// Outras funções:
+// - pub fn deserialize_number_or_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+// - fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+// - fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+// - fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+// - fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+// - fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+// - fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+// - pub fn public_path() -> PathBuf {
+// - pub async fn read_log_file(channel_id: &i32, date: &str) -> Result<String, ServiceError> {
+// - pub fn sizeof_fmt(mut num: f64) -> String {
+// - pub fn local_utc_offset() -> i32 {
+// - pub fn naive_date_time_from_str<'de, D>(deserializer: D) -> Result<NaiveDateTime, D::Error>
+// - pub async fn gen_tcp_socket(exclude_socket: &str) -> Option<String> {
+// - pub fn round_to_nearest_ten(num: i64) -> i64 {
+// - pub async fn is_running_in_container() -> bool {
+//
+// Dependências (imports completos):
+// - use std::{
+//   env, fmt,
+//   path::{Path, PathBuf},
+//   };
+// - use chrono::{format::ParseErrorKind, prelude::*};
+// - use log::*;
+// - use path_clean::PathClean;
+// - use rand::Rng;
+// - use regex::Regex;
+// - use tokio::{fs, net::TcpListener, process::Command};
+// - use serde::{
+//   de::{self, Visitor},
+//   Deserialize, Deserializer, Serialize,
+//   };
+// - use crate::db::GLOBAL_SETTINGS;
+// - use crate::player::utils::time_to_sec;
+// - use crate::utils::{errors::ServiceError, logging::log_file_path};
+// - use crate::ARGS;
+// --------------------------------------------------
+//
+// Este comentário foi adicionado automaticamente para facilitar 
+// o entendimento do contexto do projeto por sistemas de IA como o Claude.
+// FIM METADADOS CLAUDE
+//
+
 use std::{
     env, fmt,
     path::{Path, PathBuf},
@@ -28,6 +93,7 @@ pub mod playlist;
 pub mod system;
 pub mod task_runner;
 pub mod time_machine;
+pub mod recovery;
 
 use crate::db::GLOBAL_SETTINGS;
 use crate::player::utils::time_to_sec;

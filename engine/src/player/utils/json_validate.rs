@@ -1,3 +1,63 @@
+// INÍCIO METADADOS CLAUDE
+// Esse é o arquivo '/engine/src/player/utils/json_validate.rs que eu estou numerando como arquivo número 12'
+// Informações adicionais:
+// - Tamanho sem o cabeçalho Claude: 11320 bytes
+// - Número de linhas sem o cabeçalho Claude: 308
+// - Status Git: Modified (modificado mas não adicionado ao staging)
+// - Branch atual: skip_clip_on_cuda_decoder_error
+// - Última modificação: Wed Feb 19 20:18:30 2025 -0300
+// - Possível propósito: Processamento de mídia
+//
+// RESUMO ESTRUTURAL:
+// --------------------------------------------------
+// Estruturas (structs):
+// - Nenhuma struct definido neste arquivo
+//
+// Enumerações (enums):
+// - Nenhuma enum definido neste arquivo
+//
+// Traits:
+// - Nenhuma trait definida neste arquivo
+//
+// Funções por categoria:
+// Outras funções:
+// - async fn check_media(
+// - pub async fn validate_playlist(
+//
+// Dependências (imports completos):
+// - use std::{
+//   process::Stdio,
+//   sync::{
+//   atomic::{AtomicBool, Ordering},
+//   Arc,
+//   },
+//   time::Instant,
+//   };
+// - use log::*;
+// - use regex::Regex;
+// - use tokio::{
+//   io::{AsyncBufReadExt, BufReader},
+//   process::Command,
+//   sync::Mutex,
+//   };
+// - use crate::player::filter::FilterType::Audio;
+// - use crate::player::utils::{
+//   is_close, is_remote, loop_image, sec_to_time, seek_and_length, JsonPlaylist, Media,
+//   };
+// - use crate::utils::{
+//   config::{OutputMode::Null, PlayoutConfig, FFMPEG_IGNORE_ERRORS, IMAGE_FORMAT},
+//   errors::ProcessError,
+//   logging::Target,
+//   recovery::ChannelRecoveryState,
+//   };
+// - use crate::vec_strings;
+// --------------------------------------------------
+//
+// Este comentário foi adicionado automaticamente para facilitar 
+// o entendimento do contexto do projeto por sistemas de IA como o Claude.
+// FIM METADADOS CLAUDE
+//
+
 use std::{
     process::Stdio,
     sync::{
@@ -23,6 +83,7 @@ use crate::utils::{
     config::{OutputMode::Null, PlayoutConfig, FFMPEG_IGNORE_ERRORS, IMAGE_FORMAT},
     errors::ProcessError,
     logging::Target,
+    recovery::ChannelRecoveryState,
 };
 use crate::vec_strings;
 
@@ -134,12 +195,12 @@ async fn check_media(
     }
 
     if !error_list.is_empty() {
-        error!(target: Target::file_mail(), channel = id;
-            "<bright black>[Validator]</> ffmpeg error on position <yellow>{pos}</> - {}: <b><magenta>{}</></b>: {}",
-            sec_to_time(begin),
-            node.source,
-            error_list.join("\n")
-        );
+        // error!(target: Target::file_mail(), channel = id;
+        //     "<bright black>[Validator]</> ffmpeg error on position <yellow>{pos}</> - {}: <b><magenta>{}</></b>: {}",
+        //     sec_to_time(begin),
+        //     node.source,
+        //     error_list.join("\n")
+        // );
     }
 
     error_list.clear();
@@ -163,6 +224,7 @@ pub async fn validate_playlist(
     current_list: Arc<Mutex<Vec<Media>>>,
     mut playlist: JsonPlaylist,
     is_alive: Arc<AtomicBool>,
+    recovery_state: Arc<ChannelRecoveryState>,
 ) {
     let id = config.general.channel_id;
     let date = playlist.date;
@@ -186,33 +248,73 @@ pub async fn validate_playlist(
         }
 
         let pos = index + 1;
+        let is_remote_source = is_remote(&item.source);
 
-        if !is_remote(&item.source) {
-            if item.audio.is_empty() {
-                if let Err(e) = item.add_probe(false).await {
-                    error!(target: Target::file_mail(), channel = id;
-                        "[Validation] Error on position <yellow>{pos:0>3}</> - <yellow>{}</>: {e}",
-                        sec_to_time(begin)
-                    );
-                }
-            } else if let Err(e) = item.add_probe(true).await {
+        // Verificar se o arquivo estava na lista de incompatíveis
+        let was_incompatible = if !is_remote_source {
+            recovery_state.is_file_incompatible(&item.source).await
+        } else {
+            false // Não revalidamos fontes remotas
+        };
+
+        if !is_remote_source {
+            // Tenta fazer o probe do arquivo
+            let probe_result = if item.audio.is_empty() {
+                item.add_probe(false).await
+            } else {
+                item.add_probe(true).await
+            };
+            
+            // Se o probe falhar, marca ou mantém como incompatível
+            if let Err(e) = probe_result {
                 error!(target: Target::file_mail(), channel = id;
                     "[Validation] Error on position <yellow>{pos:0>3}</> - <yellow>{}</>: {e}",
                     sec_to_time(begin)
                 );
+                
+                if !was_incompatible {
+                    //recovery_state.mark_file_incompatible(item.source.clone()).await;
+                }
+                //continue;
             }
         }
 
+        // Se chegou até aqui e temos um probe e o arquivo estava marcado como incompatível,
+        // fazemos uma validação mais completa
         if item.probe.is_some() {
-            if let Err(e) = check_media(item.clone(), pos, begin, &config).await {
+            if was_incompatible {
+                // Verifica se o arquivo passou na validação completa
+                match check_media(item.clone(), pos, begin, &config).await {
+                    Ok(_) => {
+                        // Validação completa bem-sucedida - remove da lista de incompatíveis
+                        info!(target: Target::file_mail(), channel = id;
+                            "[Validation] Previously incompatible file now validated: <b><magenta>{}</></b>",
+                            item.source
+                        );
+                        //recovery_state.remove_incompatible_file(&item.source).await;
+                    },
+                    Err(_) => {
+                        // Falhou na validação completa - mantém como incompatível
+                        debug!(target: Target::file_mail(), channel = id;
+                            "[Validation] File remains incompatible: <b><magenta>{}</></b>",
+                            item.source
+                        );
+                        //continue; // Pula o resto do processamento para este item
+                    }
+                }
+            } else if let Err(e) = check_media(item.clone(), pos, begin, &config).await {
+                // Validação completa para arquivos que não estavam marcados como incompatíveis
                 error!(target: Target::file_mail(), channel = id; "{e}");
+                //recovery_state.mark_file_incompatible(item.source.clone()).await;
             } else if config.general.validate {
+                // Arquivo passou na validação normal
                 debug!(target: Target::file_mail(), channel = id;
                     "[Validation] Source at <yellow>{}</>, seems fine: <b><magenta>{}</></b>",
                     sec_to_time(begin),
                     item.source
                 );
             } else if let Ok(mut list) = current_list.try_lock() {
+                // Atualiza a lista atual com as informações do probe
                 // Filter out same item in current playlist, then add the probe to it.
                 // Check also if duration differs with playlist value, log error if so and adjust that value.
                 list.iter_mut().filter(|list_item| list_item.source == item.source).for_each(|o| {

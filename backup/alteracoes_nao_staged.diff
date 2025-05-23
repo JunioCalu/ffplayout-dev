@@ -1,0 +1,975 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 693f1cbd..b1df24c3 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -950,6 +950,15 @@ version = "0.4.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "6245d59a3e82a7fc217c5828a6692dbc6dfb63a0c8c90495621f7b9d79704a0e"
+ 
++[[package]]
++name = "convert_case"
++version = "0.7.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "bb402b8d4c85569410425650ce3eddc7d698ed96d39a73f941b08fb63082f1e7"
++dependencies = [
++ "unicode-segmentation",
++]
++
+ [[package]]
+ name = "cookie"
+ version = "0.16.2"
+@@ -1174,7 +1183,7 @@ version = "0.99.19"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3da29a38df43d6f156149c9b43ded5e018ddff2a855cf2cfd62e8cd7d079c69f"
+ dependencies = [
+- "convert_case",
++ "convert_case 0.4.0",
+  "proc-macro2",
+  "quote",
+  "rustc_version",
+@@ -1217,6 +1226,7 @@ version = "2.0.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "bda628edc44c4bb645fbe0f758797143e4e07926f7ebf4e9bdfbd3d2ce621df3"
+ dependencies = [
++ "convert_case 0.7.1",
+  "proc-macro2",
+  "quote",
+  "syn 2.0.98",
+diff --git a/engine/Cargo.toml b/engine/Cargo.toml
+index 896840fe..68f3c384 100644
+--- a/engine/Cargo.toml
++++ b/engine/Cargo.toml
+@@ -28,7 +28,6 @@ async-walkdir = "2"
+ chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+ chrono-tz = { version = "0.10", features = ["serde"] }
+ clap = { version = "4.3", features = ["derive", "env"] }
+-derive_more = { version = "2", features = ["display"] }
+ faccess = "0.2"
+ flexi_logger = { version = "0.29", features = ["async", "colors", "kv"] }
+ futures-util = { version = "0.3", default-features = false, features = ["std"] }
+@@ -66,6 +65,7 @@ zeromq = { version = "0.4", default-features = false, features = [
+     "tokio-runtime",
+     "tcp-transport",
+ ] }
++derive_more = { version = "2.0.1", features = ["is_variant", "display"] }
+ 
+ [build-dependencies]
+ static-files = "0.2"
+diff --git a/engine/src/player/filter/mod.rs b/engine/src/player/filter/mod.rs
+index f708e111..a5820cd1 100644
+--- a/engine/src/player/filter/mod.rs
++++ b/engine/src/player/filter/mod.rs
+@@ -38,9 +38,48 @@ use FilterType::*;
+ 
+ const HW_FILTER_POSTFIX: &[&str; 6] = &["_cuda", "_npp", "_opencl", "_vaapi", "_vulkan", "_qsv"];
+ 
++// NO_HW_TRANSFER_FILTERS contains filters that don't require hardware acceleration transfer
++// These filters operate on metadata, timing, or perform stream operations that can be
++// efficiently handled in software without the overhead of hardware memory transfers
++const NO_HW_TRANSFER_FILTERS: &[&str] = &[
++    // Metadata and timing filters
++    "settb",        // Sets timebase for the video frames
++    "setpts",       // Modifies presentation timestamps
++    "metadata",     // Manipulates stream metadata
++    "setdar",       // Sets display aspect ratio
++    "setsar",       // Sets sample aspect ratio
++    "setrange",     // Sets color range metadata
++    
++    // Stream operation filters
++    "streamselect", // Selects specific streams from input
++    "select",       // Selects frames based on conditions
++    "trim",         // Cuts the input stream
++    "segment",      // Splits the input stream into segments
++    
++    // Buffer and memory operation filters
++    "loop",         // Loops the input stream
++    "fifo",         // Temporally buffers frames
++    "shuffleframes",// Reorders frames in the stream
++    "reverse",      // Reverses the input stream
++    
++    // Timing and control filters
++    "fps",          // Adjusts frames per second
++    "sendcmd",      // Schedules commands at specific times
++    "setparams",    // Sets filter parameters dynamically
++    "framestep",    // Selects one frame every N frames
++    "dejudder",     // Fixes judder issues in video
++    "realtime",     // Synchronizes to real-time
++    
++    // Analysis and debugging filters
++    "bench",        // Benchmarks filter performance
++    "perms"         // Controls read/write permissions
++];
++
+ #[derive(Debug, Clone)]
+ pub struct Filters {
++    category: String,
+     hw_context: bool,
++    hw_context_cuda: bool,
+     a_chain: Vec<String>,
+     v_chain: Vec<String>,
+     pub audio_chain: String,
+@@ -67,8 +106,17 @@ impl Filters {
+             .as_ref()
+             .is_some_and(|i| i.contains("-hw"));
+ 
++        let hw_cuda = config
++            .advanced
++            .decoder
++            .input_param
++            .as_ref()
++            .is_some_and(|p| p.contains("cuda") || p.contains("cuvid"));
++
+         Self {
++            category: String::new(),
+             hw_context: hw,
++            hw_context_cuda: hw_cuda,
+             a_chain: vec![],
+             v_chain: vec![],
+             audio_chain: String::new(),
+@@ -88,22 +136,22 @@ impl Filters {
+     }
+ 
+     pub fn add(&mut self, filter: Option<&str>, track_nr: i32, filter_type: FilterType) {
+-        let (map, chain, position, last) = match filter_type {
+-            Audio => (
+-                &mut self.audio_map,
+-                &mut self.a_chain,
+-                self.audio_position,
+-                &mut self.audio_last,
+-            ),
+-            Video => (
+-                &mut self.video_map,
+-                &mut self.v_chain,
+-                self.video_position,
+-                &mut self.video_last,
+-            ),
+-        };
+-    
+         if let Some(filter) = filter {
++            let (map, chain, position, last) = match filter_type {
++                Audio => (
++                    &mut self.audio_map,
++                    &mut self.a_chain,
++                    self.audio_position,
++                    &mut self.audio_last,
++                ),
++                Video => (
++                    &mut self.video_map,
++                    &mut self.v_chain,
++                    self.video_position,
++                    &mut self.video_last,
++                ),
++            };
++    
+             if *last == track_nr {
+                 chain.push(filter.to_string());
+             } else {
+@@ -127,13 +175,13 @@ impl Filters {
+                     chain_start.push_str(&format!("{sep}[{position}:{filter_type}:{track_nr}]"));
+                 }
+     
+-                if self.hw_context
+-                    && !is_hw(filter)
+-                    && !filter.contains("hwdownload")
+-                    && !filter.contains("hwupload")
+-                    && filter_type == Video
+-                {
+-                    chain_start.push_str("hwdownload,format=nv12,");
++                if self.hw_context && filter_type == Video {
++                    let chain_str = chain.join(",");
++                    let hw_dl = hw_download(self.hw_context_cuda, &chain_str, filter);
++                    if !hw_dl.is_empty() {
++                        chain_start.push_str(&hw_dl);
++                        chain_start.push_str(",");
++                    }
+                 }
+     
+                 chain_start.push_str(filter);
+@@ -150,63 +198,61 @@ impl Filters {
+ 
+     fn build(&mut self) {
+         for (i, filter) in self.a_chain.iter().enumerate() {
+-            if let Some(filter_str) = Some(filter.as_str()) {
+-                if i > 0 && i < self.a_chain.len() && !filter_str.starts_with("[") {
+-                    self.audio_chain.push(',');
+-                }
+-    
+-                self.audio_chain.push_str(filter_str);
+-    
+-                if filter_str.ends_with("]") && i < self.a_chain.len() - 1 {
+-                    self.audio_chain.push(';');
+-                }
++            if i > 0 && i < self.a_chain.len() && !filter.starts_with("[") {
++                self.audio_chain.push(',');
++            }
++
++            self.audio_chain.push_str(filter);
++
++            if filter.ends_with(']') && i < self.a_chain.len() - 1 {
++                self.audio_chain.push(';');
+             }
+         }
+-    
++
+         for (i, filter) in self.v_chain.iter().enumerate() {
+-            if let Some(filter_str) = Some(filter.as_str()) {
+-                if filter_str.starts_with("movie=") {
+-                    if self.hw_context
+-                        && !last_is_hw(&self.video_chain)
+-                        && !self.config.advanced.is_empty_filter()
+-                    {
+-                        let hw_up = hw_upload_str(&self.config);
+-    
+-                        self.video_chain.push(',');
+-                        self.video_chain.push_str(&hw_up);
+-                    }
+-                    if !filter_str.contains("]") {
+-                        self.video_chain.push_str("[v];");
+-                    }
+-                } else if filter_str.starts_with("overlay") {
+-                    let hw_up = hw_upload(&self.config, &self.video_chain, filter_str);
+-    
+-                    if !hw_up.is_empty() {
+-                        self.video_chain.push(',');
+-                        self.video_chain.push_str(&hw_up);
+-                    }
+-    
+-                    self.video_chain.push_str("[l];[v][l]");
+-                } else if i > 0 && i < self.v_chain.len() && !filter_str.starts_with("[") {
++            if filter.starts_with("movie=") && !self.video_chain.ends_with(';') {
++                if self.hw_context
++                    && !last_is_hw(self.hw_context_cuda, &self.video_chain)
++                    && !self.config.advanced.is_empty_filter()
++                {
++                    let hw_up = hw_upload_str(&self.config);
++
+                     self.video_chain.push(',');
+-    
+-                    let hw_dl = hw_download(&self.video_chain, filter_str);
+-                    let hw_ul = hw_upload(&self.config, &self.video_chain, filter_str);
+-    
+-                    if (!hw_dl.is_empty() || !hw_ul.is_empty())
+-                        && !filter_str.starts_with("movie=")
+-                        && !filter_str.starts_with("overlay")
+-                    {
+-                        self.video_chain.push_str(&hw_dl);
+-                        self.video_chain.push_str(&hw_ul);
+-                        self.video_chain.push(',');
+-                    }
++                    self.video_chain.push_str(&hw_up);
+                 }
+-    
+-                self.video_chain.push_str(filter_str);
+-                if filter_str.ends_with("]") && i < self.v_chain.len() - 1 {
+-                    self.video_chain.push(';');
++                if !filter.ends_with(']') {
++                    self.video_chain.push_str("[v];");
++                }
++            } else if filter.starts_with("overlay") && !self.video_chain.ends_with(';') {
++                let hw_up = hw_upload(&self.config, self.hw_context_cuda, &self.video_chain, filter);
++
++                if !hw_up.is_empty() {
++                    self.video_chain.push(',');
++                    self.video_chain.push_str(&hw_up);
+                 }
++                if !filter.ends_with(']') {
++                    self.video_chain.push_str("[l];[v][l]");
++                }
++            } else if i > 0 && i < self.v_chain.len() && !self.video_chain.ends_with(';') && !filter.starts_with("[") {
++                self.video_chain.push(',');
++
++                let hw_dl = hw_download(self.hw_context_cuda, &self.video_chain, filter);
++                let hw_ul = hw_upload(&self.config, self.hw_context_cuda, &self.video_chain, filter);
++
++                if (!hw_dl.is_empty() || !hw_ul.is_empty())
++                    && !filter.starts_with("movie=")
++                    && !filter.starts_with("overlay")
++                {
++                    self.video_chain.push_str(&hw_dl);
++                    self.video_chain.push(',');
++                    self.video_chain.push_str(&hw_ul);
++                    self.video_chain.push(',');
++                }
++            }
++
++            self.video_chain.push_str(filter);
++            if filter.ends_with(']') && i < self.v_chain.len() - 1 {
++                self.video_chain.push(';');
+             }
+         }
+     }
+@@ -215,44 +261,52 @@ impl Filters {
+         if !self.output_chain.is_empty() {
+             return self.output_chain.clone();
+         }
+-
++     
+         let mut cmd = vec![];
+-
++     
+         if self.audio_last >= 0 && !self.audio_chain.ends_with(']') {
+-            self.audio_chain
+-                .push_str(&format!("[aout{}]", self.audio_last));
++            self.audio_chain.push_str(&format!("[aout{}]", self.audio_last));
+         }
+-
+-        if self.video_last >= 0 && !self.video_chain.is_empty() && !self.video_chain.ends_with(']')
+-        {
+-            if self.hw_context && !last_is_hw(&self.video_chain) {
+-                let hw_up = hw_upload_str(&self.config);
+-
+-                self.video_chain.push_str(",format=nv12,");
+-                self.video_chain.push_str(&hw_up);
++     
++        if self.video_last >= 0 && !self.video_chain.is_empty() {
++            if self.category == "advertisement" {
++                if let Some(last_bracket_start) = self.video_chain.rfind('[') {
++                    if let Some(last_bracket_end) = self.video_chain[last_bracket_start..].find(']') {
++                        let final_bracket_end = last_bracket_start + last_bracket_end + 1;
++                        if final_bracket_end == self.video_chain.len() {
++                            self.video_chain = self.video_chain[..last_bracket_start].to_string();
++                        }
++                    }
++                }
+             }
+ 
+-            self.video_chain
+-                .push_str(&format!("[vout{}]", self.video_last));
++            if !self.video_chain.ends_with(']') {
++                if self.hw_context && !last_is_hw(self.hw_context_cuda, &self.video_chain) {
++                    let hw_up = hw_upload_str(&self.config);
++                    self.video_chain.push_str(",format=nv12,");
++                    self.video_chain.push_str(&hw_up);
++                }
++                
++                self.video_chain.push_str(&format!("[vout{}]", self.video_last));
++            }
+         }
+-
++     
+         let mut f_chain = self.video_chain.clone();
+-
++     
+         if !self.audio_chain.is_empty() {
+-            if !f_chain.is_empty() {
++            if !f_chain.ends_with(';') && !f_chain.is_empty() {
+                 f_chain.push(';');
+             }
+-
+             f_chain.push_str(&self.audio_chain);
+         }
+-
++     
+         if !f_chain.is_empty() {
+             cmd.push("-filter_complex".to_string());
+             cmd.push(f_chain);
+         }
+-
++     
+         cmd
+-    }
++     }
+ 
+     pub fn map(&mut self) -> Vec<String> {
+         if !self.output_chain.is_empty() && self.config.processing.override_filter {
+@@ -289,43 +343,384 @@ impl Default for Filters {
+     }
+ }
+ 
++fn get_filter_name(filter: &str) -> &str {
++    let trimmed = filter.trim();
++
++    if trimmed.starts_with('[') && trimmed.ends_with(']') {
++        let content = &trimmed[1..trimmed.len()-1];
++        if !content.contains('=') && !content.contains('[') {
++            return "";
++        }
++    }
++    
++    let mut content = trimmed;
++    
++    while let Some(right_bracket) = content.find(']') {
++        let after_bracket = &content[right_bracket + 1..].trim();
++        if after_bracket.is_empty() {
++            break;
++        }
++        content = after_bracket;
++        if !content.starts_with('[') {
++            break;
++        }
++    }
++    
++    if let Some(left_bracket) = content.rfind('[') {
++        content = &content[..left_bracket].trim();
++    }
++    
++    if content.is_empty() {
++        return "";
++    }
++    
++    content
++        .split([':', '=', '@'])
++        .next()
++        .map(|s| s.trim().split('\\').next().unwrap_or(s).trim())
++        .unwrap_or("")
++}
++
++fn is_no_hw_transfer_filter(filter: &str) -> bool {
++    let filter_name = get_filter_name(filter);
++    NO_HW_TRANSFER_FILTERS.contains(&filter_name)
++}
++
+ fn is_hw(filter: &str) -> bool {
+     HW_FILTER_POSTFIX.iter().any(|p| filter.contains(p))
+ }
+ 
+-fn last_is_hw(chain: &str) -> bool {
+-    let parts: Vec<&str> = chain.split_terminator([',', ';']).map(str::trim).collect();
++fn split_filter_string(s: &str) -> Vec<&str> {
++    let mut result = Vec::new();
++    let mut start = 0;
++    let mut in_parentheses = false;
++    let mut is_escaped = false;
++    
++    for (i, c) in s.char_indices() {
++        match c {
++            '\\' => {
++                is_escaped = !is_escaped;
++            },
++            '(' => {
++                if !is_escaped {
++                    in_parentheses = true;
++                }
++                is_escaped = false;
++            },
++            ')' => {
++                if !is_escaped {
++                    in_parentheses = false;
++                }
++                is_escaped = false;
++            },
++            ',' | ';' => {
++                if !is_escaped && !in_parentheses {
++                    let part = &s[start..i];
++                    if !part.trim().is_empty() {
++                        result.push(part.trim());
++                    }
++                    if c == ';' {
++                        result.push(";");
++                    }
++                    start = i + 1;
++                }
++                is_escaped = false;
++            },
++            _ => {
++                is_escaped = false;
++            }
++        }
++    }
++    
++    let final_part = &s[start..];
++    if !final_part.trim().is_empty() {
++        result.push(final_part.trim());
++    }
++    
++    result
++}
++
++fn find_last_hw_filter(chain: &str) -> Option<(usize, &str)> {
++    let parts: Vec<&str> = split_filter_string(chain);
+ 
+-    match parts.len() {
+-        0 => false,
+-        1 => {
+-            let last = parts[0];
+-            HW_FILTER_POSTFIX.iter().any(|p| last.contains(p)) && !last.contains("hwdownload")
++    if parts.is_empty() {
++        return None;
++    }
++
++    let last_filter = get_filter_name(parts.last().unwrap());
++    if last_filter.contains("hwdownload") ||
++       last_filter == "format" ||
++       last_filter.contains("hwupload") {
++        return Some((parts.len() - 1, ""));
++    }
++
++    for (idx, part) in parts.iter().enumerate().rev() {
++        let filter_name = get_filter_name(part);
++
++        if !is_no_hw_transfer_filter(filter_name) &&
++           HW_FILTER_POSTFIX.iter().any(|p| filter_name.contains(p)) &&
++           !filter_name.contains("hwdownload") &&
++           !filter_name.contains("hwupload")
++        {
++            for check_part in &parts[idx+1..] {
++                let check_name = get_filter_name(check_part);
++                
++                if check_name.contains("hwdownload") || 
++                   check_name == "format" || 
++                   check_name.contains("hwupload") ||
++                   *check_part == ";" {
++                    return Some((parts.iter().position(|&x| x == *check_part).unwrap(), ""));
++                }
++                
++                if !is_hw(check_name) && 
++                   !is_no_hw_transfer_filter(check_name) && 
++                   !check_name.is_empty() {
++                    return None;
++                }
++            }
++            return Some((idx, *part));
+         }
+-        _ => {
+-            let last = parts[parts.len() - 1];
+-            let second_last = parts[parts.len() - 2];
+-            HW_FILTER_POSTFIX.iter().any(|p| last.contains(p))
+-                && !last.contains("hwdownload")
+-                && !second_last.contains("hwdownload")
++    }
++
++    None
++}
++
++fn find_first_sw_filter(f: &str) -> Option<(usize, &str)> {
++    let parts: Vec<&str> = split_filter_string(f);
++
++    for (idx, part) in parts.iter().enumerate() {
++        let filter_name = get_filter_name(part);
++        
++        if filter_name.contains("hwdownload") || 
++           filter_name == "format" || 
++           filter_name.contains("hwupload") ||
++           *part == ";" {
++            return Some((idx, ""));
++        }
++
++        if !is_no_hw_transfer_filter(filter_name) &&
++           HW_FILTER_POSTFIX.iter().any(|p| filter_name.contains(p)) {
++            return None;
++        }
++
++        if !is_no_hw_transfer_filter(filter_name) &&
++           !HW_FILTER_POSTFIX.iter().any(|p| filter_name.contains(p)) &&
++           !filter_name.contains("hwdownload") &&
++           !filter_name.contains("hwupload") {
++            return Some((idx, part));
+         }
+     }
++
++    None
+ }
+ 
+-fn hw_download(chain: &str, f: &str) -> String {
+-    let mut filter = String::new();
++fn find_last_yuv420p_hw_filter(chain: &str) -> Option<(usize, &str)> {
++    let parts: Vec<&str> = split_filter_string(chain);
++ 
++    if parts.is_empty() {
++        return None;
++    }
++ 
++    for (idx, part) in parts.iter().enumerate().rev() {
++        let filter_name = get_filter_name(part);
++ 
++        if filter_name.contains("hwdownload") || filter_name.contains("hwupload") {
++            return Some((idx, ""));
++        }
++ 
++        let is_hw_filter = !is_no_hw_transfer_filter(filter_name) && 
++                          HW_FILTER_POSTFIX.iter().any(|p| filter_name.contains(p));
++ 
++        if is_hw_filter {
++            let params_start = part.find(filter_name)
++                .map(|i| i + filter_name.len())
++                .unwrap_or(0);
++            let params_str = &part[params_start..];
++ 
++            let has_yuv420p = params_str
++                .split(|c| c == ':' || c == '=')
++                .skip(1)
++                .collect::<Vec<_>>()
++                .windows(2)
++                .any(|w| w[0].trim() == "format" && w[1].trim() == "yuv420p");
++ 
++            if has_yuv420p {
++                let mut valid = true;
++                for check_part in &parts[idx+1..] {
++                    let check_name = get_filter_name(check_part);
++                    
++                    if check_name.contains("hwdownload") || 
++                       check_name.contains("hwupload") {
++                        return Some((
++                            parts.iter().position(|&x| x == *check_part).unwrap(),
++                            ""
++                        ));
++                    }
++                    
++                    if !is_hw(check_name) && 
++                       !is_no_hw_transfer_filter(check_name) && 
++                       check_name != "pad" &&
++                       !check_name.is_empty() {
++                        valid = false;
++                        break;
++                    }
++                }
++ 
++                if valid {
++                    return Some((idx, *part));
++                }
++            } else {
+ 
+-    if last_is_hw(chain)
+-        && !is_hw(f)
+-        && !f.starts_with("null[")
+-        && !f.starts_with("[")
+-        && !f.contains("hwdownload")
+-        && !f.contains("hwupload")
+-    {
+-        filter = "hwdownload".to_string();
++                if !filter_name.contains("hwdownload") && !filter_name.contains("hwupload") {
++                    let mut standard_valid = true;
++                    
++                    for check_part in &parts[idx+1..] {
++                        let check_name = get_filter_name(check_part);
++                        
++                        if check_name.contains("hwdownload") || 
++                           check_name == "format" || 
++                           check_name.contains("hwupload") ||
++                           *check_part == ";" {
++                            return Some((
++                                parts.iter().position(|&x| x == *check_part).unwrap(),
++                                ""
++                            ));
++                        }
++                        
++                        if !is_hw(check_name) && 
++                           !is_no_hw_transfer_filter(check_name) && 
++                           !check_name.is_empty() {
++                            standard_valid = false;
++                            break;
++                        }
++                    }
++                    
++                    if standard_valid {
++                        return Some((idx, *part));
++                    }
++                }
++            }
++        }
++    }
++    
++    let last_filter = get_filter_name(parts.last().unwrap());
++    if last_filter.contains("hwdownload") ||
++       last_filter == "format" ||
++       last_filter.contains("hwupload") {
++        return Some((parts.len() - 1, ""));
++    }
++    
++    None
++}
+ 
+-        if !chain.contains("_cuda") || !chain.contains("_npp") {
+-            filter.push_str(",format=nv12");
++fn should_use_nv12_format<'a>(last_yuv420p_hw: Option<(usize, &str)>, f: &'a str) -> Option<(usize, &'a str)> {
++    if let Some((_, hw_filter)) = last_yuv420p_hw {
++        if !hw_filter.is_empty() {
++            let has_yuv420p = hw_filter.contains("format=yuv420p");
++                
++            if has_yuv420p {
++                let f_parts: Vec<&str> = split_filter_string(f);
++                let has_pad = f_parts.iter().any(|&x| get_filter_name(x) == "pad");
++                
++                if has_pad {
++                    let pad_pos = f_parts.iter()
++                        .position(|&x| get_filter_name(x) == "pad")
++                        .unwrap_or(f_parts.len());
++                    
++                    for (idx, part) in f_parts[..pad_pos].iter().enumerate() {
++                        let name = get_filter_name(part);
++                        let is_sw = !NO_HW_TRANSFER_FILTERS.contains(&name) && name != "pad";
++                        if is_sw {
++                            return Some((idx, "nv12"));
++                        }
++                    }
++                    None
++                } else {
++                    for (idx, part) in f_parts.iter().enumerate() {
++                        let name = get_filter_name(part);
++                        if !NO_HW_TRANSFER_FILTERS.contains(&name) {
++                            return Some((idx, "nv12"));
++                        }
++                    }
++                    None
++                }
++            } else {
++
++                let parts: Vec<&str> = split_filter_string(f);
++                
++                for (idx, part) in parts.iter().enumerate() {
++                    let filter_name = get_filter_name(part);
++                    
++                    if filter_name.contains("hwdownload") || 
++                       filter_name == "format" || 
++                       filter_name.contains("hwupload") ||
++                       *part == ";" {
++                        return Some((idx, ""));
++                    }
++                    
++                    if !is_no_hw_transfer_filter(filter_name) &&
++                       HW_FILTER_POSTFIX.iter().any(|p| filter_name.contains(p)) {
++                        return None;
++                    }
++                    
++                    if !is_no_hw_transfer_filter(filter_name) &&
++                       !HW_FILTER_POSTFIX.iter().any(|p| filter_name.contains(p)) &&
++                       !filter_name.contains("hwdownload") &&
++                       !filter_name.contains("hwupload") {
++                        return Some((idx, *part));
++                    }
++                }
++                
++                None
++            }
++        } else {
++            None
++        }
++    } else {
++        None
++    }
++}
++
++fn last_is_hw(hw_context_cuda: bool, chain: &str) -> bool {
++    if hw_context_cuda {
++        if let Some((_, _last_yuv420p_hw)) = find_last_yuv420p_hw_filter(chain) {
++            return true;
++        }
++    } else if let Some((_, _last_hw)) = find_last_hw_filter(chain) {
++        return true;
++    }
++    false
++}
++
++fn hw_download(hw_context_cuda: bool, chain: &str, f: &str) -> String {
++    let mut filter = String::new();
++    let chain_trimmed = chain.trim();
++    let f_trimmed = f.trim();
++    
++    if chain_trimmed.ends_with(']') || f_trimmed.starts_with('[') || f_trimmed.starts_with(";") {
++        return filter;
++    }
++
++    if hw_context_cuda {
++        if let Some((idx, last_yuv420p_hw)) = find_last_yuv420p_hw_filter(chain) {
++            if let Some((_, first_sw)) = should_use_nv12_format(Some((idx, last_yuv420p_hw)), f) {
++                if !last_yuv420p_hw.is_empty() {
++                    if !first_sw.is_empty(){
++                        filter = "hwdownload".to_string();
++                        if first_sw == "nv12" {
++                            filter.push_str(",format=nv12");
++                        }
++                    }
++                }
++            }
++        }
++    } else {
++        if let Some((_, last_hw)) = find_last_hw_filter(chain) {
++            if let Some((_, first_sw)) = find_first_sw_filter(f) {
++                if !last_hw.is_empty() && !first_sw.is_empty(){
++                    filter = "hwdownload,format=nv12".to_string();
++                }
++            }
+         }
+     }
+ 
+@@ -338,7 +733,7 @@ fn hw_upload_str(config: &PlayoutConfig) -> String {
+         .decoder
+         .input_param
+         .as_ref()
+-        .is_some_and(|p| p.contains("cuda"))
++        .is_some_and(|p| p.contains("cuda") || p.contains("cuvid"))
+     {
+         return "hwupload_cuda".to_string();
+     }
+@@ -346,10 +741,10 @@ fn hw_upload_str(config: &PlayoutConfig) -> String {
+     "hwupload".to_string()
+ }
+ 
+-fn hw_upload(config: &PlayoutConfig, chain: &str, f: &str) -> String {
++fn hw_upload(config: &PlayoutConfig, hw_context_cuda: bool, chain: &str, f: &str) -> String {
+     let mut filter = String::new();
+ 
+-    if !last_is_hw(chain) && is_hw(f) && !f.contains("hwdownload") && !f.contains("hwupload") && !f.contains("hwupload_cuda") {
++    if !last_is_hw(hw_context_cuda, chain) && is_hw(f) && !f.contains("hwdownload") && !f.contains("hwupload") {
+         filter = hw_upload_str(config);
+     }
+ 
+@@ -373,11 +768,21 @@ fn deinterlace(config: &PlayoutConfig, chain: &mut Filters, field_order: &Option
+ fn pad(config: &PlayoutConfig, chain: &mut Filters, aspect: f64) {
+     let pad = match &config.advanced.filter.pad_video {
+         FilterValue::Some(pad_video) => {
+-            let (numerator, denominator) = fraction(config.processing.aspect, 100);
+-            Some(custom_format(
+-                pad_video,
+-                &[&numerator.to_string(), &denominator.to_string()],
+-            ))
++            if pad_video.contains("{}:{}") {
++                Some(custom_format(
++                    pad_video,
++                    &[
++                        &config.processing.width.to_string(),
++                        &config.processing.height.to_string(),
++                    ],
++                ))
++            } else {
++                let (numerator, denominator) = fraction(config.processing.aspect, 100);
++                Some(custom_format(
++                    pad_video,
++                    &[&numerator.to_string(), &denominator.to_string()],
++                ))
++            }
+         },
+         FilterValue::None => {
+             if !is_close(aspect, config.processing.aspect, 0.03) {
+@@ -727,6 +1132,7 @@ pub async fn filter_chains(
+     filter_chain: &Option<Arc<Mutex<Vec<String>>>>,
+ ) -> Filters {
+     let mut filters = Filters::new(config.clone(), 0);
++    filters.category = node.category.clone();
+ 
+     if config.processing.override_filter {
+         //override hole filtering
+diff --git a/engine/src/utils/advanced_config.rs b/engine/src/utils/advanced_config.rs
+index 7e2be8ac..23ee8b37 100644
+--- a/engine/src/utils/advanced_config.rs
++++ b/engine/src/utils/advanced_config.rs
+@@ -10,20 +10,16 @@ use ts_rs::TS;
+ 
+ use crate::db::{handles, models::AdvancedConfiguration};
+ use crate::utils::ServiceError;
++use derive_more::IsVariant;
+ 
+-#[derive(Debug, Clone, TS, PartialEq)]
++#[derive(Debug, Clone, TS, PartialEq, Default, IsVariant)]
+ pub enum FilterValue {
+     Some(String),
+     Null,
++    #[default]
+     None,
+ }
+ 
+-impl Default for FilterValue {
+-    fn default() -> Self {
+-        FilterValue::None
+-    }
+-}
+-
+ impl<'de> Deserialize<'de> for FilterValue {
+     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+     where
+@@ -52,23 +48,25 @@ impl Serialize for FilterValue {
+     }
+ }
+ 
+-impl FilterValue {
+-    pub fn is_none(&self) -> bool {
+-        matches!(self, FilterValue::None)
+-    }
+-
+-    pub fn is_null(&self) -> bool {
+-        matches!(self, FilterValue::Null)
+-    }
+-
+-    pub fn is_some(&self) -> bool {
+-        matches!(self, FilterValue::Some(_))
++impl From<Option<String>> for FilterValue {
++    fn from(opt: Option<String>) -> Self {
++        match opt {
++            Some(s) if s.trim().is_empty() => FilterValue::None,
++            Some(s) if s.to_lowercase() == "null" => FilterValue::Null,
++            Some(s) => FilterValue::Some(s),
++            None => FilterValue::None,
++        }
+     }
++}
+ 
+-    pub fn as_ref(&self) -> Option<&str> {
+-        match self {
+-            FilterValue::Some(s) => Some(s),
+-            _ => None,
++impl From<&str> for FilterValue {
++    fn from(s: &str) -> Self {
++        if s.trim().is_empty() {
++            FilterValue::None
++        } else if s.to_lowercase() == "null" {
++            FilterValue::Null
++        } else {
++            FilterValue::Some(s.to_string())
+         }
+     }
+ }
+@@ -224,15 +222,6 @@ pub struct FilterConfig {
+ 
+ impl AdvancedConfig {
+     pub fn new(config: AdvancedConfiguration) -> Self {
+-        fn to_filter_value(opt: Option<String>) -> FilterValue {
+-            match opt {
+-                Some(s) if s.trim().is_empty() => FilterValue::None,
+-                Some(s) if s.to_lowercase() == "null" => FilterValue::Null,
+-                Some(s) => FilterValue::Some(s),
+-                None => FilterValue::None,
+-            }
+-        }
+-
+         Self {
+             id: config.id,
+             name: config.name,
+@@ -256,27 +245,27 @@ impl AdvancedConfig {
+                 },
+             },
+             filter: FilterConfig {
+-                deinterlace: to_filter_value(config.filter_deinterlace),
+-                pad_video: to_filter_value(config.filter_pad_video),
+-                fps: to_filter_value(config.filter_fps),
+-                scale: to_filter_value(config.filter_scale),
+-                set_dar: to_filter_value(config.filter_set_dar),
+-                fade_in: to_filter_value(config.filter_fade_in),
+-                fade_out: to_filter_value(config.filter_fade_out),
+-                logo: to_filter_value(config.filter_logo),
+-                overlay_logo_scale: to_filter_value(config.filter_overlay_logo_scale),
+-                overlay_logo_fade_in: to_filter_value(config.filter_overlay_logo_fade_in),
+-                overlay_logo_fade_out: to_filter_value(config.filter_overlay_logo_fade_out),
+-                overlay_logo: to_filter_value(config.filter_overlay_logo),
+-                tpad: to_filter_value(config.filter_tpad),
+-                drawtext_from_file: to_filter_value(config.filter_drawtext_from_file),
+-                drawtext_from_zmq: to_filter_value(config.filter_drawtext_from_zmq),
+-                aevalsrc: to_filter_value(config.filter_aevalsrc),
+-                afade_in: to_filter_value(config.filter_afade_in),
+-                afade_out: to_filter_value(config.filter_afade_out),
+-                apad: to_filter_value(config.filter_apad),
+-                volume: to_filter_value(config.filter_volume),
+-                split: to_filter_value(config.filter_split),
++                deinterlace: config.filter_deinterlace.into(),
++                pad_video: config.filter_pad_video.into(),
++                fps: config.filter_fps.into(),
++                scale: config.filter_scale.into(),
++                set_dar: config.filter_set_dar.into(),
++                fade_in: config.filter_fade_in.into(),
++                fade_out: config.filter_fade_out.into(),
++                logo: config.filter_logo.into(),
++                overlay_logo_scale: config.filter_overlay_logo_scale.into(),
++                overlay_logo_fade_in: config.filter_overlay_logo_fade_in.into(),
++                overlay_logo_fade_out: config.filter_overlay_logo_fade_out.into(),
++                overlay_logo: config.filter_overlay_logo.into(),
++                tpad: config.filter_tpad.into(),
++                drawtext_from_file: config.filter_drawtext_from_file.into(),
++                drawtext_from_zmq: config.filter_drawtext_from_zmq.into(),
++                aevalsrc: config.filter_aevalsrc.into(),
++                afade_in: config.filter_afade_in.into(),
++                afade_out: config.filter_afade_out.into(),
++                apad: config.filter_apad.into(),
++                volume: config.filter_volume.into(),
++                split: config.filter_split.into(),
+             },
+             ingest: IngestConfig {
+                 input_param: config.ingest_input_param.clone(),

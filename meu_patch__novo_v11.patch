@@ -1,0 +1,1184 @@
+diff --git a/engine/src/file/local.rs b/engine/src/file/local.rs
+index 0ae2a6cd..d1b162bb 100644
+--- a/engine/src/file/local.rs
++++ b/engine/src/file/local.rs
+@@ -324,7 +324,7 @@ impl Storage for LocalStorage {
+ 
+             while let Some(Ok(entry)) = entries.next().await {
+                 if entry.path().is_file() && include_file_extension(config, &entry.path()) {
+-                    let mut media = Media::new(index, &entry.path().to_string_lossy(), false).await;
++                    let mut media = Media::new(index, &entry.path().to_string_lossy(), false, None).await;
+ 
+                     if fillers.is_none() {
+                         if let Err(e) = media.add_probe(false).await {
+@@ -354,7 +354,7 @@ impl Storage for LocalStorage {
+             }
+         } else if filler_path.is_file() {
+             let mut media =
+-                Media::new(0, &config.storage.filler_path.to_string_lossy(), false).await;
++                Media::new(0, &config.storage.filler_path.to_string_lossy(), false, None).await;
+ 
+             if fillers.is_none() {
+                 if let Err(e) = media.add_probe(false).await {
+diff --git a/engine/src/file/watcher.rs b/engine/src/file/watcher.rs
+index 726acb92..d11a2db7 100644
+--- a/engine/src/file/watcher.rs
++++ b/engine/src/file/watcher.rs
+@@ -58,7 +58,7 @@ pub async fn watch(
+                                 if new_path.is_file() && include_file_extension(&config, new_path) {
+                                     let index = sources.lock().await.len();
+                                     let media =
+-                                        Media::new(index, &new_path.to_string_lossy(), false).await;
++                                        Media::new(index, &new_path.to_string_lossy(), false, None).await;
+ 
+                                     sources.lock().await.push(media);
+                                     info!(target: Target::file_mail(), channel = id; "Create new file: <b><magenta>{new_path:?}</></b>");
+@@ -88,13 +88,13 @@ pub async fn watch(
+                                     .position(|x| *x.source == old_path.display().to_string())
+                                 {
+                                     let media =
+-                                        Media::new(index, &new_path.to_string_lossy(), false).await;
++                                        Media::new(index, &new_path.to_string_lossy(), false, None).await;
+                                     media_list[index] = media;
+                                     info!(target: Target::file_mail(), channel = id; "Move file: <b><magenta>{old_path:?}</></b> to <b><magenta>{new_path:?}</></b>");
+                                 } else if include_file_extension(&config, new_path) {
+                                     let index = media_list.len();
+                                     let media =
+-                                        Media::new(index, &new_path.to_string_lossy(), false).await;
++                                        Media::new(index, &new_path.to_string_lossy(), false, None).await;
+ 
+                                     media_list.push(media);
+                                     info!(target: Target::file_mail(), channel = id; "Create new file: <b><magenta>{new_path:?}</></b>");
+diff --git a/engine/src/main.rs b/engine/src/main.rs
+index b0875de1..6423e381 100644
+--- a/engine/src/main.rs
++++ b/engine/src/main.rs
+@@ -248,7 +248,7 @@ async fn main() -> Result<(), ProcessError> {
+                     config,
+                     Arc::new(Mutex::new(Vec::new())),
+                     playlist,
+-                    Arc::new(AtomicBool::new(false)),
++                    Arc::new(AtomicBool::new(false)), manager.incompatible_files.clone()
+                 )
+                 .await;
+             } else if ARGS.test_mail {
+diff --git a/engine/src/player/controller.rs b/engine/src/player/controller.rs
+index 3039bd71..e5b420b3 100644
+--- a/engine/src/player/controller.rs
++++ b/engine/src/player/controller.rs
+@@ -31,6 +31,7 @@ use crate::{
+     file::{init_storage, select_storage_type, StorageBackend},
+     player::{output::player, utils::Media},
+ };
++use std::collections::HashSet;
+ 
+ const VERSION: &str = env!("CARGO_PKG_VERSION");
+ 
+@@ -77,6 +78,7 @@ pub struct ChannelManager {
+     pub current_index: Arc<AtomicUsize>,
+     pub filler_index: Arc<AtomicUsize>,
+     pub storage: Arc<Mutex<StorageBackend>>,
++    pub incompatible_files: Arc<Mutex<HashSet<String>>>,
+ }
+ 
+ impl ChannelManager {
+@@ -116,6 +118,7 @@ impl ChannelManager {
+             filter_chain: None,
+             current_date: Arc::new(Mutex::new(String::new())),
+             storage,
++            incompatible_files: Arc::new(Mutex::new(HashSet::new())),
+         }
+     }
+ 
+@@ -388,7 +391,31 @@ async fn run_channel(manager: ChannelManager) -> Result<(), ServiceError> {
+             .await;
+     }
+ 
+-    player(manager).await
++
++    match player(manager.clone()).await {
++        Ok(()) => {
++            debug!(target: Target::file_mail(), channel = channel_id;
++                "[run_channel] Player concluído com sucesso");
++            return Ok(());
++        },
++        Err(ServiceError::DecodingError(msg)) => {
++            debug!(target: Target::file_mail(), channel = channel_id;
++                "[run_channel] Substituindo arquivo incompatível: {}", msg);
++            
++            // Não resetar o índice, apenas continuar o loop
++            // para permitir que a lógica de substituição no init_clip funcione
++            return Ok(());
++        },
++        Err(e) => {
++            debug!(target: Target::file_mail(), channel = channel_id;
++                "[run_channel] Erro não tratado: {:?}", e);
++            return Err(e);
++        }
++    }
++
++    // Adicionar retorno explícito após o loop
++    //Ok(())
++
+ }
+ 
+ pub async fn drain_hls_path(path: &Path) -> io::Result<()> {
+diff --git a/engine/src/player/input/folder.rs b/engine/src/player/input/folder.rs
+index 61e51ca2..69b4fb6f 100644
+--- a/engine/src/player/input/folder.rs
++++ b/engine/src/player/input/folder.rs
+@@ -49,7 +49,7 @@ impl FolderSource {
+ 
+             while let Some(Ok(entry)) = entries.next().await {
+                 if entry.path().is_file() && include_file_extension(config, &entry.path()) {
+-                    let media = Media::new(0, &entry.path().to_string_lossy(), false).await;
++                    let media = Media::new(0, &entry.path().to_string_lossy(), false, Some(manager.clone().into())).await;
+                     media_list.push(media);
+                 }
+             }
+diff --git a/engine/src/player/input/ingest.rs b/engine/src/player/input/ingest.rs
+index f257e2e3..f2264cd8 100644
+--- a/engine/src/player/input/ingest.rs
++++ b/engine/src/player/input/ingest.rs
+@@ -74,7 +74,7 @@ pub async fn ingest_server(
+     let id = config.general.channel_id;
+     let mut server_cmd = vec_strings!["-hide_banner", "-nostats", "-v", "level+info"];
+     let stream_input = config.ingest.input_cmd.clone().unwrap();
+-    let mut dummy_media = Media::new(0, "Live Stream", false).await;
++    let mut dummy_media = Media::new(0, "Live Stream", false, Some(manager.clone().into())).await;
+     dummy_media.unit = Ingest;
+     dummy_media.add_filter(&config, &None).await;
+     let is_alive = manager.is_alive.clone();
+diff --git a/engine/src/player/input/playlist.rs b/engine/src/player/input/playlist.rs
+index c74b9d24..eb7504ad 100644
+--- a/engine/src/player/input/playlist.rs
++++ b/engine/src/player/input/playlist.rs
+@@ -24,6 +24,7 @@ use crate::utils::{
+     logging::Target,
+ };
+ 
++
+ /// Struct for current playlist.
+ ///
+ /// Here we prepare the init clip and build a iterator where we pull our clips.
+@@ -91,6 +92,7 @@ impl CurrentProgram {
+                 self.is_alive.clone(),
+                 seek,
+                 false,
++                Some(self.manager.clone()),
+             )
+             .await;
+ 
+@@ -184,6 +186,7 @@ impl CurrentProgram {
+                 self.is_alive.clone(),
+                 false,
+                 true,
++                Some(self.manager.clone()),
+             )
+             .await;
+ 
+@@ -297,9 +300,32 @@ impl CurrentProgram {
+         if !self.manager.list_init.load(Ordering::SeqCst) {
+             let time_sec = self.get_current_time();
+             let index = self.manager.current_index.load(Ordering::SeqCst);
++
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++            "[init_clip] Processando index: {} no tempo: {}", index, time_sec);
++
+             let nodes = self.manager.current_list.lock().await;
+             let last_index = nodes.len() - 1;
+ 
++            // Verificação de incompatibilidade detalhada
++            let is_incompatible = if index < nodes.len() {
++                let incompatible_files = self.manager.incompatible_files.lock().await;
++                let source = &nodes[index].source;
++                let result = incompatible_files.contains(source);
++                
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[init_clip] Arquivo no index {} é incompatível? {} - {}", 
++                    index, result, source);
++                
++                result
++            } else {
++                // Log se o índice estiver fora dos limites
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[init_clip] Index {} fora dos limites da lista (tamanho: {})", 
++                    index, nodes.len());
++                false
++            };
++
+             // de-instance node to preserve original values in list
+             let mut node_clone = nodes[index].clone();
+ 
+@@ -308,23 +334,67 @@ impl CurrentProgram {
+ 
+             trace!("Clip from init: {}", node_clone.source);
+ 
++            if is_incompatible {
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[init_clip] Substituindo arquivo incompatível: {} por filler", 
++                    node_clone.source);
++                    
++                self.manager.current_index.fetch_add(1, Ordering::SeqCst);
++                
++                // Criar filler mantendo todas as propriedades temporais do original
++                let mut media = Media::new(index, "", false, Some(self.manager.clone().into())).await;
++                
++                // Copiar EXATAMENTE todos os atributos temporais
++                media.probe = None;
++                media.begin = node_clone.begin;
++                media.seek = node_clone.seek;
++                media.out = node_clone.out;
++                media.duration = node_clone.duration;
++                media.index = node_clone.index; // Garantir que o índice também seja copiado
++
++                // Adicionar este log para rastrear melhor os valores de tempo
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[init_clip] Atributos temporais do original: begin={}, seek={}, duration={}, out={}",
++                    node_clone.begin.unwrap_or_default(), node_clone.seek, node_clone.duration, node_clone.out);
++                
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[init_clip] Criando filler com duração exata de {} segundos e begin: {}", 
++                    media.out - media.seek, media.begin.unwrap_or_default());
++                
++                // Garantir que list_init permaneça false
++                self.manager.list_init.store(false, Ordering::SeqCst);
++                
++                let last_index = self.manager.current_list.lock().await.len() - 1;
++                self.gen_source(media, last_index).await;
++                
++                return true;
++            } 
++
+             node_clone.seek += time_sec
+                 - (node_clone.begin.unwrap() - self.manager.channel.lock().await.time_shift);
+ 
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++            "[init_clip] Seek ajustado para: {}", node_clone.seek);
++
+             self.last_next_ad(&mut node_clone).await;
+ 
+             self.manager.current_index.fetch_add(1, Ordering::SeqCst);
+ 
+             self.handle_list_init(node_clone, last_index).await;
+ 
+-            if self
+-                .current_node
+-                .source
+-                .contains(&self.config.channel.storage.to_string_lossy().to_string())
+-                || self.current_node.source.contains("color=c=#121212")
++        // Em vez da condição atual, usar algo como:
++        if self.current_node.source.is_empty() && self.current_node.duration > 0.0  // Filler de substituição
++            || self.current_node.source.contains("color=c=#121212")  // Filler de cor
++            || self.current_node.source == self.config.storage.filler_path.to_string_lossy()  // Filler específico
++            || self.current_node.source.contains("/filler/") // Diretório de fillers
+             {
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                "[init_clip] Detectado filler: {}", self.current_node.source);
+                 is_filler = true;
+             }
++        }  else {
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++                "[init_clip] list_init está true, pulando verificação de incompatibilidade");
+         }
+ 
+         is_filler
+@@ -333,7 +403,7 @@ impl CurrentProgram {
+     async fn fill_end(&mut self, total_delta: f64) {
+         // Fill end from playlist
+         let index = self.manager.current_index.load(Ordering::SeqCst);
+-        let mut media = Media::new(index, "", false).await;
++        let mut media = Media::new(index, "", false, Some(self.manager.clone().into())).await;
+         media.begin = Some(time_in_seconds(&self.config.channel.timezone));
+         media.duration = total_delta;
+         media.out = total_delta;
+@@ -462,6 +532,7 @@ impl CurrentProgram {
+                 // Handle summer/winter time changes.
+                 // It only checks if the time change is one hour backwards or forwards.
+                 // Production usage must be shown if this is sufficient, or if a real change needs to be verified.
++
+                 if is_close(
+                     shifted_delta.abs(),
+                     3600.0,
+@@ -508,22 +579,22 @@ impl CurrentProgram {
+     /// Generate the source CMD, or when clip not exist, get a dummy.
+     pub async fn gen_source(&mut self, mut node: Media, last_index: usize) {
+         let node_index = node.index.unwrap_or_default();
+-        let duration = node.out - node.seek;
+-
+-        if node.duration > 0.0 && duration < 1.0 {
++        let original_duration = node.out - node.seek;  // Preservar a duração original desejada
++    
++        if node.duration > 0.0 && original_duration < 1.0 {
+             warn!(
+                 target: Target::file_mail(), channel = self.channel_id;
+-                "Skip clip that is less then one second long (<yellow>{duration:.3}</>)."
++                "Skip clip that is less then one second long (<yellow>{original_duration:.3}</>)."
+             );
+-
++    
+             // INFO:
+             // This part has been changed twice, the last time in January 2024.
+             // Better case is that it skips the short clip, especially when reloading a playlist,
+             // it prevents the last clip from playing again for 1.2 seconds.
+             // But the behavior needs to be observed for a longer time to be sure that it has no side effects.
+-
++    
+             // duration = 1.2;
+-
++    
+             // if node.seek > 1.0 {
+             //     node.seek -= 1.2;
+             // } else {
+@@ -531,15 +602,15 @@ impl CurrentProgram {
+             // }
+             node.skip = true;
+         }
+-
+-        trace!("Clip length: {duration}, duration: {}", node.duration);
+-
++    
++        trace!("Clip length: {original_duration}, duration: {}", node.duration);
++    
+         if node.probe.is_none() && !node.source.is_empty() {
+             if let Err(e) = node.add_probe(true).await {
+                 trace!("{e:?}");
+             };
+         }
+-
++    
+         // separate if condition, because of node.add_probe() in last condition
+         if node.probe.is_some() {
+             if node
+@@ -555,59 +626,73 @@ impl CurrentProgram {
+                     warn!(target: Target::file_mail(), channel = self.channel_id; "Clip loops and has seek value: duplicate clip to separate loop and seek.");
+                     self.duplicate_for_seek_and_loop(&mut node).await;
+                 }
+-
++    
+                 node.cmd = Some(seek_and_length(&self.config, &mut node));
+             }
+         } else {
+             trace!("clip index: {node_index} | last index: {last_index}");
+-
++    
+             // Last index is the index from the last item from the node list.
+             if node_index < last_index {
+                 error!(target: Target::file_mail(), channel = self.channel_id; "Source not found: <b><magenta>{}</></b>", node.source);
+             }
+-
++    
+             let fillers = self.manager.filler_list.lock().await;
+-
+-            // Set list_init to true, to stay in sync.
+-            self.manager.list_init.store(true, Ordering::SeqCst);
+-
+-            if self
+-                .manager
+-                .storage
+-                .lock()
+-                .await
+-                .is_dir(&self.config.storage.filler_path)
+-                && !fillers.is_empty()
+-            {
++            
++            // Verificar se é uma substituição de arquivo incompatível
++            let is_incompatible_replacement = node.source.is_empty() && original_duration > 0.0;
++            
++            // Definir list_init apenas se não for substituição de arquivo incompatível
++            if !is_incompatible_replacement {
++                // Set list_init to true, to stay in sync.
++                self.manager.list_init.store(true, Ordering::SeqCst);
++            } else {
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[gen_source] Mantendo list_init como false para substituição de arquivo incompatível");
++            }
++    
++            if self.config.storage.filler_path.is_dir() && !fillers.is_empty() {
+                 let mut index = self.manager.filler_index.fetch_add(1, Ordering::SeqCst);
+-
++    
+                 if index > fillers.len() - 1 {
+                     index = 0;
+                 }
+-
++    
+                 let mut filler_media = fillers[index].clone();
+-
++                
++                // Log para diagnóstico
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[gen_source] Filler selecionado - source: {}, duration: {}, duração necessária: {}", 
++                    filler_media.source, filler_media.duration, original_duration);
++    
+                 trace!("take filler: {}", filler_media.source);
+-
++    
+                 if index == fillers.len() - 1 {
+                     // reset index for next round
+                     self.manager.filler_index.store(0, Ordering::SeqCst);
+                 }
+-
++    
+                 if filler_media.probe.is_none() {
+                     if let Err(e) = filler_media.add_probe(false).await {
+                         error!(target: Target::file_mail(), channel = self.channel_id; "{e:?}");
+                     };
+                 }
+-
+-                if node.duration > 0.0 && filler_media.duration > duration {
+-                    filler_media.out = duration;
+-                }
+-
++    
++                // CORREÇÃO CRÍTICA: Preservar a duração original ao criar o filler
+                 node.source = filler_media.source;
+                 node.seek = 0.0;
+-                node.out = filler_media.out;
++                
++                // Preservar a duração original no out
++                node.out = original_duration;
++                
++                // Manter a duração real do filler para que o cálculo de loop_count funcione
+                 node.duration = filler_media.duration;
++                
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[gen_source] Configurando filler - duração original: {}, duração do filler: {}, loop necessário: {}",
++                    original_duration, filler_media.duration, 
++                    if filler_media.duration > 0.0 { (original_duration / filler_media.duration).ceil() } else { 1.0 });
++                
+                 node.cmd = Some(loop_filler(&self.config, &node));
+                 node.probe = filler_media.probe;
+             } else {
+@@ -632,13 +717,7 @@ impl CurrentProgram {
+                             node.cmd = Some(loop_image(&self.config, &node));
+                             node.probe = Some(probe);
+                         } else if let Some(filler_duration) = probe.clone().format.duration {
+-                            // Create placeholder from config filler.
+-                            let filler_out = if node.duration == 0.0 {
+-                                filler_duration
+-                            } else {
+-                                filler_duration.min(duration)
+-                            };
+-
++                            // CORREÇÃO: Preservar a duração original aqui também
+                             node.source = self
+                                 .config
+                                 .storage
+@@ -647,13 +726,13 @@ impl CurrentProgram {
+                                 .to_string_lossy()
+                                 .to_string();
+                             node.seek = 0.0;
+-                            node.out = filler_out;
+-                            node.duration = filler_duration;
++                            node.out = original_duration;  // Usar a duração original
++                            node.duration = filler_duration;  // Manter a duração real do filler
+                             node.cmd = Some(loop_filler(&self.config, &node));
+                             node.probe = Some(probe);
+                         } else {
+                             // Create colored placeholder.
+-                            let (source, cmd) = gen_dummy(&self.config, duration);
++                            let (source, cmd) = gen_dummy(&self.config, original_duration);  // Usar duração original
+                             node.source = source;
+                             node.cmd = Some(cmd);
+                         }
+@@ -661,40 +740,38 @@ impl CurrentProgram {
+                     Err(e) => {
+                         // Create colored placeholder.
+                         error!(target: Target::file_mail(), channel = self.channel_id; "Filler error: {e}");
+-
+-                        let mut dummy_duration = 60.0;
+-
+-                        if node.duration > 0.0 && dummy_duration > duration {
+-                            dummy_duration = duration;
+-                        }
+-
+-                        let (source, cmd) = gen_dummy(&self.config, dummy_duration);
++    
++                        // Usar a duração original aqui também
++                        let (source, cmd) = gen_dummy(&self.config, original_duration);
+                         node.seek = 0.0;
+-                        node.out = dummy_duration;
+-                        node.duration = dummy_duration;
++                        node.out = original_duration;
++                        node.duration = original_duration;  // Para placeholders coloridos, a duração é a mesma
+                         node.source = source;
+                         node.cmd = Some(cmd);
+                     }
+                 }
+             }
+-
++    
+             warn!(
+                 target: Target::file_mail(), channel = self.channel_id;
+-                "Generate filler with <yellow>{:.2}</> seconds length!",
+-                node.out
++                "Generate filler with <yellow>{:.2}</> seconds length! Duração original: <yellow>{:.2}</>, Loop configurado: {}",
++                node.out,
++                original_duration,
++                node.cmd.as_ref().map_or(false, |cmd| cmd.join(" ").contains("-stream_loop"))
+             );
+         }
+-
++    
+         node.add_filter(&self.config, &self.manager.filter_chain.clone())
+             .await;
+-
++    
+         trace!(
+-            "return gen_source: {}, seek: {}, out: {}",
++            "return gen_source: {}, seek: {}, out: {}, duration: {}",
+             node.source,
+             node.seek,
+             node.out,
++            node.duration
+         );
+-
++    
+         self.current_node = node;
+     }
+ 
+@@ -765,7 +842,7 @@ impl CurrentProgram {
+                     last_index = length - 1;
+                 }
+ 
+-                let mut media = Media::new(length, "", false).await;
++                let mut media = Media::new(length, "", false, Some(self.manager.clone().into())).await;
+                 media.begin = Some(current_time);
+                 media.duration = total_delta;
+                 media.out = total_delta;
+@@ -778,17 +855,78 @@ impl CurrentProgram {
+             < self.manager.current_list.lock().await.len()
+         {
+             // get next clip from current playlist
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++            "[next] Branch normal de processamento de arquivo");
+ 
+             let mut is_last = false;
+             let index = self.manager.current_index.load(Ordering::SeqCst);
++
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++            "[next] Processando index: {}", index);
++
+             let node_list = self.manager.current_list.lock().await;
++
++            // Verificação de incompatibilidade com logs...
++            // let is_incompatible = if index < node_list.len() {
++            //     let source = node_list[index].source.clone();
++            //     let incompatible_files = self.manager.incompatible_files.lock().await;
++            //     let result = incompatible_files.contains(&source);
++                
++            //     debug!(target: Target::file_mail(), channel = self.channel_id;
++            //         "[next] Arquivo no index {} é incompatível? {} - {}", 
++            //         index, result, source);
++                    
++            //     result
++            // } else {
++            //     // Log se o índice estiver fora dos limites...
++            //     debug!(target: Target::file_mail(), channel = self.channel_id;
++            //         "[next] Index {} fora dos limites da lista (tamanho: {})", 
++            //         index, node_list.len());
++            //     false
++            // };
++
+             let mut node = node_list[index].clone();
+             let last_index = node_list.len() - 1;
+ 
+             drop(node_list);
+ 
++            // if is_incompatible {
++            //     debug!(target: Target::file_mail(), channel = self.channel_id;
++            //         "[next] Substituindo arquivo incompatível: {} por filler", 
++            //         node.source);
++                
++            //     // REMOVER ESTA LINHA - Não incrementar o índice aqui
++            //     // self.manager.current_index.fetch_add(1, Ordering::SeqCst);
++                
++            //     // Criar filler com EXATAMENTE os mesmos parâmetros temporais
++            //     let mut filler = Media::new(index, "", false, Some(self.manager.clone().into())).await;
++                
++            //     // Manter todos os atributos temporais idênticos
++            //     filler.begin = node.begin;
++            //     filler.seek = node.seek;
++            //     filler.out = node.out;
++            //     filler.duration = node.duration;
++                
++            //     debug!(target: Target::file_mail(), channel = self.channel_id;
++            //         "[next] Criando filler com duração exata de {} segundos e begin: {}", 
++            //         filler.out - filler.seek, filler.begin.unwrap_or_default());
++                
++            //     self.last_next_ad(&mut filler).await;
++            //     self.gen_source(filler, last_index).await;
++                
++            //     // Garantir que list_init permaneça false
++            //     self.manager.list_init.store(false, Ordering::SeqCst);
++                
++            //     // Incrementar o índice normalmente no final da função next()
++            //     self.manager.current_index.fetch_add(1, Ordering::SeqCst);
++                
++            //     return Some(self.current_node.clone());
++            // }
++
+             if index == last_index {
+                 is_last = true;
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                "[next] Processando último arquivo da lista");
+             }
+ 
+             self.last_next_ad(&mut node).await;
+@@ -805,12 +943,20 @@ impl CurrentProgram {
+                 // Playlist is to early finish,
+                 // and if we have to fill it with a placeholder.
+                 trace!("Total delta on list end: {total_delta}");
++            
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[next] Preenchendo fim da playlist com placeholder, total_delta = {}", 
++                    total_delta);
++
++                trace!("Total delta on list end: {total_delta}");
+ 
+                 self.fill_end(total_delta).await;
+ 
+                 return Some(self.current_node.clone());
+             }
+             // Get first clip from next playlist.
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++            "[next] Obtendo primeiro clip da próxima playlist");
+ 
+             let c_list = self.manager.current_list.lock().await;
+             let mut first_node = c_list[0].clone();
+diff --git a/engine/src/player/output/hls.rs b/engine/src/player/output/hls.rs
+index 477d46ff..d7689695 100644
+--- a/engine/src/player/output/hls.rs
++++ b/engine/src/player/output/hls.rs
+@@ -62,7 +62,7 @@ async fn ingest_writer(manager: ChannelManager) -> Result<(), ServiceError> {
+     let chain = manager.filter_chain.clone();
+     let stream_input = config.ingest.input_cmd.clone().unwrap();
+     let mut server_prefix = vec_strings!["-hide_banner", "-nostats", "-v", "level+info"];
+-    let mut dummy_media = Media::new(0, "Live Stream", false).await;
++    let mut dummy_media = Media::new(0, "Live Stream", false, Some(manager.clone().into())).await;
+ 
+     dummy_media.unit = Ingest;
+     dummy_media.add_filter(&config, &chain).await;
+diff --git a/engine/src/player/output/mod.rs b/engine/src/player/output/mod.rs
+index e16b31af..5fdbbd1c 100644
+--- a/engine/src/player/output/mod.rs
++++ b/engine/src/player/output/mod.rs
+@@ -56,6 +56,29 @@ async fn play(
+             None => break,
+         };
+ 
++        // ADICIONADO: Log para analisar a duração e comando
++        debug!(target: Target::file_mail(), channel = id;
++            "[play] Analisando comando de decoder - duração calculada: {}, duração do arquivo: {}, out: {}, seek: {}, -t no comando: {}, comando contém stream_loop? {}",
++            node.out - node.seek,
++            node.duration,
++            node.out,
++            node.seek,
++            cmd.join(" ").contains(" -t "),
++            cmd.join(" ").contains("-stream_loop")
++        );
++
++        // ADICIONADO: Log para analisar parâmetros exatos de -t
++        if let Some(t_pos) = cmd.iter().position(|arg| arg == "-t") {
++            if t_pos + 1 < cmd.len() {
++                debug!(target: Target::file_mail(), channel = id;
++                    "[play] Valor de -t no comando: {}", cmd[t_pos + 1]);
++            }
++        }
++
++        // ADICIONADO: Log para ver o comando completo
++        debug!(target: Target::file_mail(), channel = id;
++            "[play] Comando completo: {}", cmd.join(" "));
++
+         if node.skip {
+             // skip is different from node.cmd = None.
+             // This source is valid, but too short to play,
+@@ -183,7 +206,46 @@ async fn play(
+         drop(decoder_stdout);
+ 
+         manager.wait(Decoder).await;
+-        error_decoder_task.await??;
++        
++        match error_decoder_task.await {
++            Ok(Ok(())) => {
++                debug!(target: Target::file_mail(), channel = id;
++                    "[play] Decodificação bem-sucedida para: {}", node.source);
++            },
++            Ok(Err(ServiceError::DecodingError(msg))) => {
++                error!(target: Target::file_mail(), channel = id; 
++                    "Arquivo incompatível detectado: {}: {}", node.source, msg);
++                
++                // Marcar arquivo como incompatível
++                {
++                    let mut incompatible_files = manager.incompatible_files.lock().await;
++                    if !incompatible_files.contains(&node.source) {
++                        incompatible_files.insert(node.source.clone());
++                        debug!(target: Target::file_mail(), channel = id;
++                            "[play] Adicionado arquivo à lista de incompatíveis: {}", node.source);
++                    }
++                }
++                
++                debug!(target: Target::file_mail(), channel = id;
++                    "[play] Continuando para próximo arquivo sem propagar erro");
++                
++                // Notificar o ChannelManager para ajustar timing da playlist
++                manager.list_init.store(false, Ordering::SeqCst);
++                
++                // Continuar o loop para o próximo arquivo
++                continue;
++            },
++            Ok(Err(e)) => {
++                debug!(target: Target::file_mail(), channel = id;
++                    "[play] Erro diferente de DecodingError: {:?}", e);
++                return Err(e);
++            },
++            Err(e) => {
++                debug!(target: Target::file_mail(), channel = id;
++                    "[play] Erro na task de decodificação: {:?}", e);
++                return Err(ServiceError::InternalServerError);
++            },
++        }
+     }
+ 
+     Ok(())
+diff --git a/engine/src/player/utils/import.rs b/engine/src/player/utils/import.rs
+index c30fe8b1..9b1121e2 100644
+--- a/engine/src/player/utils/import.rs
++++ b/engine/src/player/utils/import.rs
+@@ -50,7 +50,7 @@ pub async fn import_file(
+     let mut lines = reader.lines();
+     while let Some(line) = lines.next_line().await? {
+         if !line.starts_with('#') {
+-            let item = Media::new(0, &line, true).await;
++            let item = Media::new(0, &line, true, None).await;
+ 
+             if item.duration > 0.0 {
+                 playlist.program.push(item);
+diff --git a/engine/src/player/utils/json_serializer.rs b/engine/src/player/utils/json_serializer.rs
+index 0d0ed0b6..fb27d64c 100644
+--- a/engine/src/player/utils/json_serializer.rs
++++ b/engine/src/player/utils/json_serializer.rs
+@@ -12,6 +12,8 @@ use crate::player::utils::{
+     PlayoutConfig,
+ };
+ use crate::utils::{config::DUMMY_LEN, logging::Target};
++use crate::player::controller::ChannelManager;
++use std::collections::HashSet;
+ 
+ /// This is our main playlist object, it holds all necessary information for the current day.
+ #[derive(Debug, Serialize, Deserialize, Clone)]
+@@ -98,6 +100,7 @@ pub async fn read_json(
+     is_alive: Arc<AtomicBool>,
+     seek: bool,
+     get_next: bool,
++    manager: Option<ChannelManager>,
+ ) -> JsonPlaylist {
+     let id = config.general.channel_id;
+     let config_clone = config.clone();
+@@ -145,12 +148,20 @@ pub async fn read_json(
+                     let list_clone = playlist.clone();
+ 
+                     if !config.general.skip_validation {
++
++                        let incompatible_files = manager
++                        .as_ref()
++                        .map(|mgr| mgr.incompatible_files.clone())
++                        .unwrap_or_else(|| Arc::new(Mutex::new(HashSet::new())));
++                
+                         tokio::spawn(validate_playlist(
+                             config_clone,
+                             current_list,
+                             list_clone,
+                             is_alive,
++                            incompatible_files,
+                         ));
++                    
+                     }
+ 
+                     set_defaults(&mut playlist);
+@@ -192,11 +203,18 @@ pub async fn read_json(
+         let list_clone = playlist.clone();
+ 
+         if !config.general.skip_validation {
++            
++            let incompatible_files = manager
++            .as_ref()
++            .map(|mgr| mgr.incompatible_files.clone())
++            .unwrap_or_else(|| Arc::new(Mutex::new(HashSet::new())));
++    
+             tokio::spawn(validate_playlist(
+                 config_clone,
+                 current_list,
+                 list_clone,
+                 is_alive,
++                incompatible_files,
+             ));
+         }
+ 
+diff --git a/engine/src/player/utils/json_validate.rs b/engine/src/player/utils/json_validate.rs
+index 650a0916..cf03923a 100644
+--- a/engine/src/player/utils/json_validate.rs
++++ b/engine/src/player/utils/json_validate.rs
+@@ -25,6 +25,7 @@ use crate::utils::{
+     logging::Target,
+ };
+ use crate::vec_strings;
++use std::collections::HashSet;
+ 
+ /// Validate a single media file.
+ ///
+@@ -163,6 +164,7 @@ pub async fn validate_playlist(
+     current_list: Arc<Mutex<Vec<Media>>>,
+     mut playlist: JsonPlaylist,
+     is_alive: Arc<AtomicBool>,
++    incompatible_files: Arc<Mutex<HashSet<String>>>,
+ ) {
+     let id = config.general.channel_id;
+     let date = playlist.date;
+@@ -185,22 +187,56 @@ pub async fn validate_playlist(
+             return;
+         }
+ 
++        //Verificar se já é conhecido como incompatível
++        let is_incompatible = {
++            let files = incompatible_files.lock().await;
++            files.contains(&item.source)
++        };
++
++        if is_incompatible {
++            // debug!(target: Target::file_mail(), channel = id;
++            //     "[Validation] Pulando arquivo incompatível conhecido: {}", 
++            //     item.source
++            // );
++            continue;
++        }
++
+         let pos = index + 1;
+ 
+         if !is_remote(&item.source) {
+-            if item.audio.is_empty() {
+-                if let Err(e) = item.add_probe(false).await {
++            // VERIFICAÇÃO ADICIONAL antes de tentar add_probe
++            let is_now_incompatible = {
++                let files = incompatible_files.lock().await;
++                files.contains(&item.source)
++            };
++            
++            if is_now_incompatible {
++                // debug!(target: Target::file_mail(), channel = id;
++                //     "[Validation] Evitando add_probe em arquivo incompatível: {}", 
++                //     item.source
++                // );
++                continue;
++            }
++                if item.audio.is_empty() {
++                    if let Err(e) = item.add_probe(false).await {
++                        error!(target: Target::file_mail(), channel = id;
++                            "[Validation] Error on position <yellow>{pos:0>3}</> - <yellow>{}</>: {e}",
++                            sec_to_time(begin)
++                        );
++
++                        // Adiciona à lista de incompatíveis
++                        incompatible_files.lock().await.insert(item.source.clone());
++                        continue;
++                    }
++                } else if let Err(e) = item.add_probe(true).await {
+                     error!(target: Target::file_mail(), channel = id;
+                         "[Validation] Error on position <yellow>{pos:0>3}</> - <yellow>{}</>: {e}",
+                         sec_to_time(begin)
+                     );
++                    // Adiciona à lista de incompatíveis
++                    incompatible_files.lock().await.insert(item.source.clone());
++                    continue;
+                 }
+-            } else if let Err(e) = item.add_probe(true).await {
+-                error!(target: Target::file_mail(), channel = id;
+-                    "[Validation] Error on position <yellow>{pos:0>3}</> - <yellow>{}</>: {e}",
+-                    sec_to_time(begin)
+-                );
+-            }
+         }
+ 
+         if item.probe.is_some() {
+diff --git a/engine/src/player/utils/mod.rs b/engine/src/player/utils/mod.rs
+index b086eeef..208fd952 100644
+--- a/engine/src/player/utils/mod.rs
++++ b/engine/src/player/utils/mod.rs
+@@ -38,7 +38,7 @@ use crate::player::{
+     filter::{filter_chains, Filters},
+ };
+ use crate::utils::{
+-    config::{OutputMode::*, PlayoutConfig, FFMPEG_IGNORE_ERRORS, FFMPEG_UNRECOVERABLE_ERRORS},
++    config::{OutputMode::*, PlayoutConfig, FFMPEG_IGNORE_ERRORS, FFMPEG_UNRECOVERABLE_ERRORS, FFMPEG_DECODING_ERRORS},
+     errors::ServiceError,
+     logging::Target,
+     time_machine::time_now,
+@@ -248,10 +248,13 @@ pub struct Media {
+ 
+     #[serde(default, skip_serializing)]
+     pub unit: ProcessUnit,
++
++    #[serde(skip_serializing, skip_deserializing)]
++    pub manager: Option<Arc<ChannelManager>>  // Alterado para Arc
+ }
+ 
+ impl Media {
+-    pub async fn new(index: usize, src: &str, do_probe: bool) -> Self {
++    pub async fn new(index: usize, src: &str, do_probe: bool, manager: Option<Arc<ChannelManager>>) -> Self {
+         let mut duration = 0.0;
+         let mut probe = None;
+ 
+@@ -283,6 +286,7 @@ impl Media {
+             next_ad: false,
+             skip: false,
+             unit: Decoder,
++            manager,
+         }
+     }
+ 
+@@ -362,6 +366,7 @@ impl Default for Media {
+             next_ad: false,
+             skip: false,
+             unit: Decoder,
++            manager: None,
+         }
+     }
+ }
+@@ -883,6 +888,21 @@ pub async fn stderr_reader(
+                 line.replace("[error] ", "").replace("[fatal] ", "")
+             );
+ 
++            if FFMPEG_DECODING_ERRORS.iter().any(|e| line.contains(e)) {
++                // Adicionar em stderr_reader ao detectar erro de decodificação
++                // debug!(target: Target::file_mail(), channel = channel_id;
++                //     "[stderr_reader] Erro de decodificação encontrado: {} - substituindo por filler com duração exata", 
++                //     line.replace("[error] ", "").replace("[fatal] ", ""));
++
++                // // Adicionar em play ao adicionar arquivo à lista de incompatíveis
++                // debug!(target: Target::file_mail(), channel = channel_id;
++                //     "[play] Arquivo marcado como incompatível: - será substituído por filler com duração idêntica"
++                // );
++                return Err(ServiceError::DecodingError(
++                    format!("Erro de decodificação: {}", line.replace("[error] ", "").replace("[fatal] ", ""))
++                 ));
++            }
++
+             if FFMPEG_UNRECOVERABLE_ERRORS
+                 .iter()
+                 .any(|i| line.contains(*i))
+diff --git a/engine/src/utils/config.rs b/engine/src/utils/config.rs
+index aa15679b..776d7f2e 100644
+--- a/engine/src/utils/config.rs
++++ b/engine/src/utils/config.rs
+@@ -58,6 +58,14 @@ pub const FFMPEG_UNRECOVERABLE_ERRORS: [&str; 9] = [
+     "Option not found",
+ ];
+ 
++pub const FFMPEG_DECODING_ERRORS: [&str; 5] = [
++    "no frame",
++    "CUDA_ERROR_OUT_OF_MEMORY",
++    "CUDA_ERROR_INVALID_VALUE",
++    "CUDA_ERROR_INVALID_CONTEXT",
++    "No device available for decoder",
++];
++
+ #[derive(Debug, Clone, Default, Eq, PartialEq, Deserialize, Serialize, TS)]
+ #[ts(export, export_to = "playout_config.d.ts")]
+ #[serde(rename_all = "lowercase")]
+diff --git a/engine/src/utils/errors.rs b/engine/src/utils/errors.rs
+index 1bd6fac1..899d30d5 100644
+--- a/engine/src/utils/errors.rs
++++ b/engine/src/utils/errors.rs
+@@ -27,6 +27,9 @@ pub enum ServiceError {
+ 
+     #[display("ServiceUnavailable: {_0}")]
+     ServiceUnavailable(String),
++
++    #[display("DecodingError: {_0}")]
++    DecodingError(String),
+ }
+ 
+ // impl ResponseError trait allows to convert our errors into http responses with appropriate data
+@@ -43,6 +46,9 @@ impl ResponseError for ServiceError {
+             Self::NoContent(ref message) => HttpResponse::NoContent().json(message),
+             Self::ServiceUnavailable(ref message) => {
+                 HttpResponse::ServiceUnavailable().json(message)
++            },
++            Self::DecodingError(ref message) => {
++                HttpResponse::UnprocessableEntity().json(message)
+             }
+         }
+     }
+diff --git a/engine/src/utils/generator.rs b/engine/src/utils/generator.rs
+index 350333d3..f3d30f2e 100644
+--- a/engine/src/utils/generator.rs
++++ b/engine/src/utils/generator.rs
+@@ -165,7 +165,7 @@ pub async fn generate_from_template(
+             }
+ 
+             for entry in file_list {
+-                let media = Media::new(0, &entry, true).await;
++                let media = Media::new(0, &entry, true, Some(manager.clone().into())).await;
+                 source_list.push(media);
+             }
+         }
+diff --git a/tests/src/engine_cmd.rs b/tests/src/engine_cmd.rs
+index 6f4bd76b..6cd317d5 100644
+--- a/tests/src/engine_cmd.rs
++++ b/tests/src/engine_cmd.rs
+@@ -44,7 +44,7 @@ async fn video_audio_input() {
+     let logo_path = fs::canonicalize("./assets/logo.png").unwrap();
+     config.processing.logo_path = logo_path.to_string_lossy().to_string();
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd =
+@@ -71,7 +71,7 @@ async fn video_audio_custom_filter1_input() {
+     config.processing.add_logo = false;
+     config.processing.custom_filter = "[0:v]gblur=2[c_v_out];[0:a]volume=0.2[c_a_out]".to_string();
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd = vec_strings![
+@@ -99,7 +99,7 @@ async fn video_audio_custom_filter2_input() {
+         "[0:v]null[v];movie=logo.png[l];[v][l]overlay[c_v_out];[0:a]volume=0.2[c_a_out]"
+             .to_string();
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd = vec_strings![
+@@ -126,7 +126,7 @@ async fn video_audio_custom_filter3_input() {
+     config.processing.custom_filter =
+         "[v_in];movie=logo.png[l];[v_in][l]overlay[c_v_out];[0:a]volume=0.2[c_a_out]".to_string();
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd = vec_strings![
+@@ -152,7 +152,7 @@ async fn dual_audio_aevalsrc_input() {
+     config.processing.audio_tracks = 2;
+     config.processing.add_logo = false;
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd =
+@@ -179,7 +179,7 @@ async fn dual_audio_input() {
+     config.processing.audio_tracks = 2;
+     config.processing.add_logo = false;
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let test_filter_cmd = vec_strings![
+@@ -205,7 +205,7 @@ async fn video_separate_audio_input() {
+     config.processing.audio_tracks = 1;
+     config.processing.add_logo = false;
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/no_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/no_audio.mp4", true, None).await;
+     media.audio = "./assets/media_mix/audio.mp3".to_string();
+     media.cmd = Some(seek_and_length(&config, &mut media));
+     media.add_filter(&config, &None).await;
+@@ -1402,7 +1402,7 @@ async fn video_audio_hls() {
+         "/usr/share/ffplayout/public/live/stream.m3u8"
+     ]);
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let enc_prefix = vec_strings![
+@@ -1492,7 +1492,7 @@ async fn video_audio_sub_meta_hls() {
+         "/usr/share/ffplayout/public/live/stream.m3u8"
+     ]);
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let enc_prefix = vec_strings![
+@@ -1583,7 +1583,7 @@ async fn video_multi_audio_hls() {
+         "/usr/share/ffplayout/public/live/stream.m3u8"
+     ]);
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let enc_prefix = vec_strings![
+@@ -1689,7 +1689,7 @@ async fn multi_video_audio_hls() {
+         "/usr/share/ffplayout/public/live/stream_%v.m3u8"
+     ]);
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let enc_prefix = vec_strings![
+@@ -1806,7 +1806,7 @@ async fn multi_video_multi_audio_hls() {
+         "/usr/share/ffplayout/public/live/stream_%v.m3u8"
+     ]);
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/dual_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let enc_prefix = vec_strings![
+diff --git a/tests/src/engine_filter.rs b/tests/src/engine_filter.rs
+index d84a3967..51bfb4f4 100644
+--- a/tests/src/engine_filter.rs
++++ b/tests/src/engine_filter.rs
+@@ -40,7 +40,7 @@ async fn simple_filtering() {
+     let logo_path = fs::canonicalize("./assets/logo.png").unwrap();
+     config.processing.logo_path = logo_path.to_string_lossy().to_string();
+ 
+-    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true).await;
++    let mut media = Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await;
+     media.add_filter(&config, &None).await;
+ 
+     let _f = media.filter.unwrap().cmd();
+diff --git a/tests/src/engine_generator.rs b/tests/src/engine_generator.rs
+index a37bf180..5e3b00dd 100644
+--- a/tests/src/engine_generator.rs
++++ b/tests/src/engine_generator.rs
+@@ -43,10 +43,10 @@ async fn prepare_config() -> (PlayoutConfig, ChannelManager) {
+ #[tokio::test]
+ async fn test_random_list() {
+     let clip_list = vec![
+-        Media::new(0, "./assets/media_mix/with_audio.mp4", true).await, // 30 seconds
+-        Media::new(0, "./assets/media_mix/dual_audio.mp4", true).await, // 30 seconds
+-        Media::new(0, "./assets/media_mix/av_sync.mp4", true).await,    // 30 seconds
+-        Media::new(0, "./assets/media_mix/ad.mp4", true).await,         // 25 seconds
++        Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await, // 30 seconds
++        Media::new(0, "./assets/media_mix/dual_audio.mp4", true, None).await, // 30 seconds
++        Media::new(0, "./assets/media_mix/av_sync.mp4", true, None).await,    // 30 seconds
++        Media::new(0, "./assets/media_mix/ad.mp4", true, None).await,         // 25 seconds
+     ];
+ 
+     let r_list = random_list(clip_list.clone(), 200.0);
+@@ -59,10 +59,10 @@ async fn test_random_list() {
+ #[tokio::test]
+ async fn test_ordered_list() {
+     let clip_list = vec![
+-        Media::new(0, "./assets/media_mix/with_audio.mp4", true).await, // 30 seconds
+-        Media::new(0, "./assets/media_mix/dual_audio.mp4", true).await, // 30 seconds
+-        Media::new(0, "./assets/media_mix/av_sync.mp4", true).await,    // 30 seconds
+-        Media::new(0, "./assets/media_mix/ad.mp4", true).await,         // 25 seconds
++        Media::new(0, "./assets/media_mix/with_audio.mp4", true, None).await, // 30 seconds
++        Media::new(0, "./assets/media_mix/dual_audio.mp4", true, None).await, // 30 seconds
++        Media::new(0, "./assets/media_mix/av_sync.mp4", true, None).await,    // 30 seconds
++        Media::new(0, "./assets/media_mix/ad.mp4", true, None).await,         // 25 seconds
+     ];
+ 
+     let o_list = ordered_list(clip_list.clone(), 85.0);

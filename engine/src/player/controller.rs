@@ -1,3 +1,109 @@
+// INÍCIO METADADOS CLAUDE
+// Esse é o arquivo '/engine/src/player/controller.rs que eu estou numerando como arquivo número 14'
+// Informações adicionais:
+// - Tamanho sem o cabeçalho Claude: 14876 bytes
+// - Número de linhas sem o cabeçalho Claude: 453
+// - Status Git: Modified (modificado mas não adicionado ao staging)
+// - Branch atual: skip_clip_on_cuda_decoder_error
+// - Última modificação: Tue Feb 11 12:43:28 2025 +0100
+// - Possível propósito: Configuração, Acesso a dados, Iterador, Processamento de mídia
+//
+// Documentação da struct:
+// Defined process units.
+// #[derive(Clone, Debug, Default, Copy, Eq, Serialize, Deserialize, PartialEq)]
+// pub enum ProcessUnit {
+// #[default]
+// Decoder,
+// Encoder,
+// Ingest,
+// }
+// impl fmt::Display for ProcessUnit {
+// fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+// match *self {
+// Self::Decoder => write!(f, "Decoder"),
+// Self::Encoder => write!(f, "Encoder"),
+// Self::Ingest => write!(f, "Ingest"),
+// }
+// }
+// }
+// use ProcessUnit::*;
+// #[derive(Clone, Debug)]
+//
+// RESUMO ESTRUTURAL:
+// --------------------------------------------------
+// Estruturas (structs):
+// - pub struct ChannelManager {
+// - pub struct ChannelController {
+//
+// Enumerações (enums):
+// - pub enum ProcessUnit {
+//
+// Traits:
+// - Nenhuma trait definida neste arquivo
+//
+// Funções por categoria:
+// Funções de inicialização:
+// - pub async fn new(db_pool: Pool<Sqlite>, channel: Channel, config: PlayoutConfig) -> Self {
+// - pub fn new() -> Self {
+//
+// Outras funções:
+// - fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+// - pub async fn update_channel(self, other: &Channel) {
+// - pub async fn update_config(&self, new_config: PlayoutConfig) {
+// - pub async fn start(&self) -> Result<(), ServiceError> {
+// - pub async fn foreground_start(&self, index: usize) -> Result<(), ServiceError> {
+// - pub async fn stop(&self, unit: ProcessUnit) {
+// - pub async fn wait(&self, unit: ProcessUnit) {
+// - pub async fn stop_all(&self, permanent: bool) {
+// - pub fn add(&mut self, manager: ChannelManager) {
+// - pub async fn get(&self, id: i32) -> Option<ChannelManager> {
+// - pub async fn remove(&mut self, channel_id: i32) {
+// - pub fn run_count(&self) -> usize {
+// - async fn run_channel(manager: ChannelManager) -> Result<(), ServiceError> {
+// - pub async fn drain_hls_path(path: &Path) -> io::Result<()> {
+// - async fn find_m3u8_files(path: &Path) -> io::Result<Vec<String>> {
+// - async fn delete_old_segments<P: AsRef<Path> + Clone + std::fmt::Debug>(
+//
+// Dependências (imports completos):
+// - use std::{
+//   cmp, fmt,
+//   path::Path,
+//   sync::{
+//   atomic::{AtomicBool, AtomicUsize, Ordering},
+//   Arc,
+//   },
+//   };
+// - use async_walkdir::WalkDir;
+// - use log::*;
+// - use m3u8_rs::Playlist;
+// - use serde::{Deserialize, Serialize};
+// - use sqlx::{Pool, Sqlite};
+// - use tokio::{
+//   fs,
+//   io::{self, AsyncReadExt},
+//   process::{Child, ChildStdout},
+//   sync::Mutex,
+//   time::{sleep, Duration, Instant},
+//   };
+// - use tokio_stream::StreamExt;
+// - use crate::utils::{config::PlayoutConfig, errors::ServiceError};
+// - use crate::ARGS;
+// - use crate::{
+//   db::{handles, models::Channel},
+//   utils::{logging::Target,recovery::ChannelRecoveryState},
+//   };
+// - use crate::{
+//   file::{init_storage, select_storage_type, StorageBackend},
+//   player::{output::player, utils::Media},
+//   };
+// - use ProcessUnit::*;
+// --------------------------------------------------
+//
+// Este comentário foi adicionado automaticamente para facilitar 
+// o entendimento do contexto do projeto por sistemas de IA como o Claude.
+// FIM METADADOS CLAUDE
+//
+
 use std::{
     cmp, fmt,
     path::Path,
@@ -25,7 +131,7 @@ use crate::utils::{config::PlayoutConfig, errors::ServiceError};
 use crate::ARGS;
 use crate::{
     db::{handles, models::Channel},
-    utils::logging::Target,
+    utils::{logging::Target,recovery::ChannelRecoveryState},
 };
 use crate::{
     file::{init_storage, select_storage_type, StorageBackend},
@@ -77,6 +183,7 @@ pub struct ChannelManager {
     pub current_index: Arc<AtomicUsize>,
     pub filler_index: Arc<AtomicUsize>,
     pub storage: Arc<Mutex<StorageBackend>>,
+    pub recovery_state: Arc<ChannelRecoveryState>,
 }
 
 impl ChannelManager {
@@ -116,6 +223,7 @@ impl ChannelManager {
             filter_chain: None,
             current_date: Arc::new(Mutex::new(String::new())),
             storage,
+            recovery_state: Arc::new(ChannelRecoveryState::new()),
         }
     }
 

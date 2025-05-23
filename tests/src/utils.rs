@@ -1,3 +1,49 @@
+// INÍCIO METADADOS CLAUDE
+// Esse é o arquivo '/tests/src/utils.rs que eu estou numerando como arquivo número 10'
+// Informações adicionais:
+// - Tamanho sem o cabeçalho Claude: 2586 bytes
+// - Número de linhas sem o cabeçalho Claude: 92
+// - Status Git: Modified (modificado mas não adicionado ao staging)
+// - Branch atual: skip_clip_on_cuda_decoder_error
+// - Última modificação: Thu Feb 13 08:48:15 2025 +0100
+// - Possível propósito: Testes, Configuração, Acesso a dados, Processamento de mídia
+//
+// RESUMO ESTRUTURAL:
+// --------------------------------------------------
+// Estruturas (structs):
+// - Nenhuma struct definido neste arquivo
+//
+// Enumerações (enums):
+// - Nenhuma enum definido neste arquivo
+//
+// Traits:
+// - Nenhuma trait definida neste arquivo
+//
+// Funções por categoria:
+// Outras funções:
+// - async fn prepare_config() -> (PlayoutConfig, ChannelManager) {
+// - fn mock_date_time() {
+// - fn get_date_yesterday() {
+// - fn get_date_tomorrow() {
+// - async fn test_delta() {
+//
+// Dependências (imports completos):
+// - use sqlx::sqlite::SqlitePoolOptions;
+// - use chrono::prelude::*;
+// - use serial_test::serial;
+// - use ffplayout::db::handles;
+// - use ffplayout::player::{controller::ChannelManager, utils::*};
+// - use ffplayout::utils::{
+//   config::{PlayoutConfig, ProcessMode::Playlist},
+//   time_machine::{set_mock_time, time_now},
+//   };
+// --------------------------------------------------
+//
+// Este comentário foi adicionado automaticamente para facilitar 
+// o entendimento do contexto do projeto por sistemas de IA como o Claude.
+// FIM METADADOS CLAUDE
+//
+
 use sqlx::sqlite::SqlitePoolOptions;
 
 use chrono::prelude::*;
@@ -77,7 +123,7 @@ fn get_date_tomorrow() {
 #[serial]
 #[ignore]
 async fn test_delta() {
-    let (mut config, _) = prepare_config().await;
+    let (mut config, manager) = prepare_config().await;
 
     config.mail.recipient = "".into();
     config.processing.mode = Playlist;
@@ -85,7 +131,7 @@ async fn test_delta() {
     config.playlist.length = "24:00:00".into();
 
     set_mock_time(&Some("2022-05-09T23:59:59+02:00".to_string())).unwrap();
-    let (delta, _) = get_delta(&config, &86401.0);
+    let (delta, _) = get_delta(&config, &manager.recovery_state, &86401.0);
 
     assert!(delta < 2.0);
 }

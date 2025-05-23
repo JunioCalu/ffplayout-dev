@@ -1,3 +1,65 @@
+// INÍCIO METADADOS CLAUDE
+// Esse é o arquivo '/engine/src/utils/errors.rs que eu estou numerando como arquivo número 6'
+// Informações adicionais:
+// - Tamanho sem o cabeçalho Claude: 6241 bytes
+// - Número de linhas sem o cabeçalho Claude: 243
+// - Status Git: Modified (modificado mas não adicionado ao staging)
+// - Branch atual: skip_clip_on_cuda_decoder_error
+// - Última modificação: Mon Jan 20 21:30:53 2025 +0100
+// - Possível propósito: Tratamento de erros, Acesso a dados, API/Web, Processamento de mídia
+//
+// RESUMO ESTRUTURAL:
+// --------------------------------------------------
+// Estruturas (structs):
+// - Nenhuma struct definido neste arquivo
+//
+// Enumerações (enums):
+// - pub enum ServiceError {
+// - pub enum ProcessError {
+//
+// Traits:
+// - Nenhuma trait definida neste arquivo
+//
+// Funções por categoria:
+// Outras funções:
+// - fn error_response(&self) -> HttpResponse {
+// - fn from(err: String) -> Self {
+// - fn from(err: Error) -> Self {
+// - fn from(err: actix_multipart::MultipartError) -> Self {
+// - fn from(err: std::io::Error) -> Self {
+// - fn from(err: chrono::ParseError) -> Self {
+// - fn from(err: std::num::ParseIntError) -> Self {
+// - fn from(err: jsonwebtoken::errors::Error) -> Self {
+// - fn from(err: actix_web::error::BlockingError) -> Self {
+// - fn from(err: sqlx::Error) -> Self {
+// - fn from(err: tokio::task::JoinError) -> Self {
+// - fn from(err: toml_edit::ser::Error) -> Self {
+// - fn from(err: toml_edit::TomlError) -> Self {
+// - fn from(err: uuid::Error) -> Self {
+// - fn from(err: serde_json::Error) -> Self {
+// - fn from(err: &str) -> Self {
+// - fn from(err: ProcessError) -> Self {
+// - fn from(err: FfProbeError) -> Self {
+// - fn from(err: lettre::address::AddressError) -> Self {
+// - fn from(err: lettre::transport::smtp::Error) -> Self {
+// - fn from(err: lettre::error::Error) -> Self {
+// - fn from(err: regex::Error) -> Self {
+// - fn from(err: sqlx::migrate::MigrateError) -> Self {
+// - fn from(err: inquire::InquireError) -> Self {
+// - fn from(err: ServiceError) -> Self {
+//
+// Dependências (imports completos):
+// - use std::io;
+// - use actix_web::{error::ResponseError, Error, HttpResponse};
+// - use derive_more::Display;
+// - use crate::player::utils::probe::FfProbeError;
+// --------------------------------------------------
+//
+// Este comentário foi adicionado automaticamente para facilitar 
+// o entendimento do contexto do projeto por sistemas de IA como o Claude.
+// FIM METADADOS CLAUDE
+//
+
 use std::io;
 
 use actix_web::{error::ResponseError, Error, HttpResponse};
@@ -27,6 +89,9 @@ pub enum ServiceError {
 
     #[display("ServiceUnavailable: {_0}")]
     ServiceUnavailable(String),
+
+    #[display("DecodingError: {_0}")]
+    DecodingError(String),
 }
 
 // impl ResponseError trait allows to convert our errors into http responses with appropriate data
@@ -43,6 +108,9 @@ impl ResponseError for ServiceError {
             Self::NoContent(ref message) => HttpResponse::NoContent().json(message),
             Self::ServiceUnavailable(ref message) => {
                 HttpResponse::ServiceUnavailable().json(message)
+            },
+            Self::DecodingError(ref message) => {
+                HttpResponse::UnprocessableEntity().json(message)
             }
         }
     }

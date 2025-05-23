@@ -1,3 +1,56 @@
+// INÍCIO METADADOS CLAUDE
+// Esse é o arquivo '/engine/src/player/input/ingest.rs que eu estou numerando como arquivo número 15'
+// Informações adicionais:
+// - Tamanho sem o cabeçalho Claude: 6480 bytes
+// - Número de linhas sem o cabeçalho Claude: 194
+// - Status Git: Modified (modificado mas não adicionado ao staging)
+// - Branch atual: skip_clip_on_cuda_decoder_error
+// - Última modificação: Mon Feb 17 17:30:05 2025 +0100
+// - Possível propósito: Processamento de mídia
+//
+// RESUMO ESTRUTURAL:
+// --------------------------------------------------
+// Estruturas (structs):
+// - Nenhuma struct definido neste arquivo
+//
+// Enumerações (enums):
+// - Nenhuma enum definido neste arquivo
+//
+// Traits:
+// - Nenhuma trait definida neste arquivo
+//
+// Funções por categoria:
+// Outras funções:
+// - async fn server_monitor(
+// - pub async fn ingest_server(
+//
+// Dependências (imports completos):
+// - use std::{process::Stdio, sync::atomic::Ordering};
+// - use log::*;
+// - use tokio::{
+//   io::{AsyncBufReadExt, BufReader},
+//   process::{ChildStderr, Command},
+//   };
+// - use crate::utils::{
+//   config::{PlayoutConfig, FFMPEG_IGNORE_ERRORS, FFMPEG_UNRECOVERABLE_ERRORS},
+//   logging::{log_line, Target},
+//   config::FFMPEG_DECODING_ERRORS,
+//   };
+// - use crate::vec_strings;
+// - use crate::{
+//   player::{
+//   controller::{ChannelManager, ProcessUnit::*},
+//   utils::{is_free_tcp_port, valid_stream, Media},
+//   },
+//   utils::{errors::ServiceError, logging::fmt_cmd},
+//   };
+// --------------------------------------------------
+//
+// Este comentário foi adicionado automaticamente para facilitar 
+// o entendimento do contexto do projeto por sistemas de IA como o Claude.
+// FIM METADADOS CLAUDE
+//
+
 use std::{process::Stdio, sync::atomic::Ordering};
 
 use log::*;
@@ -9,6 +62,7 @@ use tokio::{
 use crate::utils::{
     config::{PlayoutConfig, FFMPEG_IGNORE_ERRORS, FFMPEG_UNRECOVERABLE_ERRORS},
     logging::{log_line, Target},
+    config::FFMPEG_DECODING_ERRORS,
 };
 use crate::vec_strings;
 use crate::{
@@ -58,6 +112,36 @@ async fn server_monitor(
             error!(target: Target::file_mail(), channel = id; "Hit unrecoverable error!");
             manager.channel.lock().await.active = false;
             manager.stop_all(false).await;
+        }
+
+        // Adicionar tratamento para erros de decodificação CUDA
+        if FFMPEG_DECODING_ERRORS
+            .iter()
+            .any(|e| line.contains(e))
+        {
+            // Para ingest, registrar o erro com aviso
+            warn!(target: Target::file_mail(), channel = id; 
+                "[Live Ingest] Erro de decodificação detectado: {} - Tentando continuar",
+                line.replace("[error] ", "").replace("[fatal] ", ""));
+            
+            // Para erros graves de CUDA que podem afetar o sistema,
+            // reiniciar apenas o processo de ingest
+            if line.contains("CUDA_ERROR_OUT_OF_MEMORY") || 
+               line.contains("CUDA_ERROR_INVALID_CONTEXT") || 
+               line.contains("CUDA_ERROR_INVALID_VALUE")
+            {
+                warn!(target: Target::file_mail(), channel = id; 
+                    "Erro crítico de GPU no ingest - Reiniciando processo");
+                
+                // Parar apenas o processo de ingest
+                manager.stop(Ingest).await;
+                
+                // Sair do loop para permitir que o processo seja reiniciado
+                break;
+            }
+            
+            // Para outros erros de decodificação menos graves, continuar monitorando
+            continue;
         }
     }
 

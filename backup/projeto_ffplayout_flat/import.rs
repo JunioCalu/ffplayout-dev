@@ -1,0 +1,123 @@
+// INÍCIO METADADOS CLAUDE
+// Esse é o arquivo '/projeto_ffplayout_flat/import.rs que eu estou numerando como arquivo número 12'
+// Informações adicionais:
+// - Tamanho sem o cabeçalho Claude: 2203 bytes
+// - Número de linhas sem o cabeçalho Claude: 82
+// - Status Git: Untracked (novo arquivo não rastreado)
+// - Branch atual: skip_clip_on_cuda_decoder_error
+// - Última modificação: Novo arquivo
+// - Possível propósito: Processamento de mídia
+//
+// RESUMO ESTRUTURAL:
+// --------------------------------------------------
+// Estruturas (structs):
+// - Nenhuma struct definido neste arquivo
+//
+// Enumerações (enums):
+// - Nenhuma enum definido neste arquivo
+//
+// Traits:
+// - Nenhuma trait definida neste arquivo
+//
+// Funções por categoria:
+// Outras funções:
+// - pub async fn import_file(
+//
+// Dependências (imports completos):
+// - use std::{
+//   io::{Error, ErrorKind},
+//   path::Path,
+//   };
+// - use tokio::{
+//   fs::{create_dir_all, File},
+//   io::{AsyncBufReadExt, BufReader},
+//   };
+// - use crate::player::utils::{json_reader, json_serializer::JsonPlaylist, json_writer, Media};
+// --------------------------------------------------
+//
+// Este comentário foi adicionado automaticamente para facilitar 
+// o entendimento do contexto do projeto por sistemas de IA como o Claude.
+// FIM METADADOS CLAUDE
+//
+
+/// Import text/m3u file and create a playlist out of it
+use std::{
+    io::{Error, ErrorKind},
+    path::Path,
+};
+
+use tokio::{
+    fs::{create_dir_all, File},
+    io::{AsyncBufReadExt, BufReader},
+};
+
+use crate::player::utils::{json_reader, json_serializer::JsonPlaylist, json_writer, Media};
+
+pub async fn import_file(
+    playlist_root: &Path,
+    date: &str,
+    channel_name: Option<String>,
+    path: &Path,
+) -> Result<String, Error> {
+    let file = File::open(path).await?;
+    let reader = BufReader::new(file);
+    let mut playlist = JsonPlaylist {
+        channel: channel_name.unwrap_or_else(|| "Channel 1".to_string()),
+        date: date.to_string(),
+        path: None,
+        start_sec: None,
+        length: None,
+        modified: None,
+        program: vec![],
+    };
+
+    if !playlist_root.is_dir() {
+        return Err(Error::new(
+            ErrorKind::Other,
+            format!(
+                "Playlist folder <b><magenta>{:?}</></b> not exists!",
+                playlist_root,
+            ),
+        ));
+    }
+
+    let d: Vec<&str> = date.split('-').collect();
+    let year = d[0];
+    let month = d[1];
+    let playlist_path = playlist_root.join(year).join(month);
+    let playlist_file = &playlist_path.join(format!("{date}.json"));
+
+    create_dir_all(playlist_path).await?;
+
+    let mut lines = reader.lines();
+    while let Some(line) = lines.next_line().await? {
+        if !line.starts_with('#') {
+            let item = Media::new(0, &line, true, None).await;
+
+            if item.duration > 0.0 {
+                playlist.program.push(item);
+            }
+        }
+    }
+
+    let mut file_exists = false;
+
+    if playlist_file.is_file() {
+        file_exists = true;
+        let mut existing_data = json_reader(playlist_file).await?;
+        existing_data.program.append(&mut playlist.program);
+
+        playlist.program = existing_data.program;
+    };
+
+    let msg = if file_exists {
+        format!("Update playlist from {date} success!")
+    } else {
+        format!("Write playlist from {date} success!")
+    };
+
+    match json_writer(playlist_file, playlist).await {
+        Ok(_) => Ok(msg),
+        Err(e) => Err(Error::new(ErrorKind::Other, e)),
+    }
+}

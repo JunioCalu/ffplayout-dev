@@ -1,3 +1,56 @@
+// INÍCIO METADADOS CLAUDE
+// Esse é o arquivo '/engine/src/utils/control.rs que eu estou numerando como arquivo número 2'
+// Informações adicionais:
+// - Tamanho sem o cabeçalho Claude: 7209 bytes
+// - Número de linhas sem o cabeçalho Claude: 230
+// - Status Git: Modified (modificado mas não adicionado ao staging)
+// - Branch atual: skip_clip_on_cuda_decoder_error
+// - Última modificação: Wed Jan 29 10:25:15 2025 +0100
+// - Possível propósito: Acesso a dados, Processamento de mídia
+//
+// RESUMO ESTRUTURAL:
+// --------------------------------------------------
+// Estruturas (structs):
+// - struct TextParams {
+// - pub struct ControlParams {
+// - struct MediaParams {
+// - pub struct Process {
+//
+// Enumerações (enums):
+// - pub enum ProcessCtl {
+// - pub enum PlayerCtl {
+//
+// Traits:
+// - Nenhuma trait definida neste arquivo
+//
+// Funções por categoria:
+// Outras funções:
+// - fn from_str(input: &str) -> Result<Self, Self::Err> {
+// - fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+// - async fn zmq_send(msg: &str, socket_addr: &str) -> Result<String, Box<dyn Error>> {
+// - pub async fn send_message(
+// - pub async fn control_state(
+//
+// Dependências (imports completos):
+// - use std::{error::Error, fmt, str::FromStr, sync::atomic::Ordering};
+// - use log::*;
+// - use serde::{Deserialize, Serialize};
+// - use serde_json::{json, Map, Value};
+// - use sqlx::{Pool, Sqlite};
+// - use zeromq::{Socket, SocketRecv, SocketSend, ZmqMessage};
+// - use crate::db::handles;
+// - use crate::player::{
+//   controller::{ChannelManager, ProcessUnit::*},
+//   utils::{get_delta, get_media_map},
+//   };
+// - use crate::utils::{config::OutputMode::*, errors::ServiceError, logging::Target, TextFilter};
+// --------------------------------------------------
+//
+// Este comentário foi adicionado automaticamente para facilitar 
+// o entendimento do contexto do projeto por sistemas de IA como o Claude.
+// FIM METADADOS CLAUDE
+//
+
 use std::{error::Error, fmt, str::FromStr, sync::atomic::Ordering};
 
 use log::*;
@@ -179,7 +232,7 @@ pub async fn control_state(
         PlayerCtl::Back => {
             if index > 1 && current_list.len() > 1 {
                 let mut media = current_list[index - 2].clone();
-                (shift, _) = get_delta(&config, &media.begin.unwrap_or(0.0));
+                (shift, _) = get_delta(&config, &manager.recovery_state, &media.begin.unwrap_or(0.0));
 
                 info!(target: Target::file_mail(), channel = id; "Move to last clip");
 
@@ -198,7 +251,7 @@ pub async fn control_state(
         PlayerCtl::Next => {
             if index < current_list.len() {
                 let mut media = current_list[index].clone();
-                (shift, _) = get_delta(&config, &media.begin.unwrap_or(0.0));
+                (shift, _) = get_delta(&config, &manager.recovery_state, &media.begin.unwrap_or(0.0));
 
                 info!(target: Target::file_mail(), channel = id; "Move to next clip");
 

@@ -1,3 +1,55 @@
+// INÍCIO METADADOS CLAUDE
+// Esse é o arquivo '/engine/src/player/output/mod.rs que eu estou numerando como arquivo número 3'
+// Informações adicionais:
+// - Tamanho sem o cabeçalho Claude: 14157 bytes
+// - Número de linhas sem o cabeçalho Claude: 380
+// - Status Git: Modified (modificado mas não adicionado ao staging)
+// - Branch atual: skip_clip_on_cuda_decoder_error
+// - Última modificação: Wed Jan 29 10:25:15 2025 +0100
+// - Possível propósito: Acesso a dados, Iterador, Processamento de mídia
+//
+// RESUMO ESTRUTURAL:
+// --------------------------------------------------
+// Estruturas (structs):
+// - Nenhuma struct definido neste arquivo
+//
+// Enumerações (enums):
+// - Nenhuma enum definido neste arquivo
+//
+// Traits:
+// - Nenhuma trait definida neste arquivo
+//
+// Funções por categoria:
+// Outras funções:
+// - async fn play(
+// - pub async fn player(manager: ChannelManager) -> Result<(), ServiceError> {
+//
+// Dependências (imports completos):
+// - use std::{process::Stdio, sync::atomic::Ordering};
+// - use log::*;
+// - use tokio::{
+//   io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
+//   process::{ChildStdin, Command},
+//   };
+// - use crate::player::{
+//   controller::{ChannelManager, ProcessUnit::*},
+//   input::{ingest_server, source_generator},
+//   utils::{sec_to_time, stderr_reader, Media},
+//   };
+// - use crate::utils::{
+//   config::OutputMode::*,
+//   errors::ServiceError,
+//   logging::{fmt_cmd, Target},
+//   task_runner,
+//   };
+// - use crate::vec_strings;
+// --------------------------------------------------
+//
+// Este comentário foi adicionado automaticamente para facilitar 
+// o entendimento do contexto do projeto por sistemas de IA como o Claude.
+// FIM METADADOS CLAUDE
+//
+
 use std::{process::Stdio, sync::atomic::Ordering};
 
 use log::*;
@@ -14,7 +66,7 @@ mod stream;
 use crate::player::{
     controller::{ChannelManager, ProcessUnit::*},
     input::{ingest_server, source_generator},
-    utils::{sec_to_time, stderr_reader},
+    utils::{sec_to_time, stderr_reader, modify_decoder_cmd_for_recovery, Media},
 };
 use crate::utils::{
     config::OutputMode::*,
@@ -40,7 +92,7 @@ async fn play(
     // get source iterator
     let mut node_sources = source_generator(manager.clone()).await;
 
-    while let Some(node) = node_sources.next().await {
+    while let Some(mut node) = node_sources.next().await {
         *manager.current_media.lock().await = Some(node.clone());
         let ignore_dec = config.logging.ignore_lines.clone();
 
@@ -55,6 +107,29 @@ async fn play(
             Some(cmd) => cmd,
             None => break,
         };
+
+        // ADICIONADO: Log para analisar a duração e comando
+        debug!(target: Target::file_mail(), channel = id;
+            "[play] Analisando comando de decoder - duração calculada: {}, duração do arquivo: {}, out: {}, seek: {}, -t no comando: {}, comando contém stream_loop? {}",
+            node.out - node.seek,
+            node.duration,
+            node.out,
+            node.seek,
+            cmd.join(" ").contains(" -t "),
+            cmd.join(" ").contains("-stream_loop")
+        );
+
+        // ADICIONADO: Log para analisar parâmetros exatos de -t
+        if let Some(t_pos) = cmd.iter().position(|arg| arg == "-t") {
+            if t_pos + 1 < cmd.len() {
+                debug!(target: Target::file_mail(), channel = id;
+                    "[play] Valor de -t no comando: {}", cmd[t_pos + 1]);
+            }
+        }
+
+        // ADICIONADO: Log para ver o comando completo
+        debug!(target: Target::file_mail(), channel = id;
+            "[play] Comando completo: {}", cmd.join(" "));
 
         if node.skip {
             // skip is different from node.cmd = None.
@@ -95,17 +170,53 @@ async fn play(
 
         let mut dec_cmd = vec_strings!["-hide_banner", "-nostats", "-v", &ff_log_format];
 
-        if let Some(decoder_input_cmd) = &config.advanced.decoder.input_cmd {
-            dec_cmd.append(&mut decoder_input_cmd.clone());
+        let skip_advanced = manager.recovery_state.is_file_in_retry(&node.source).await;
+
+        // Adicionar parâmetros avançados somente se não for segunda tentativa
+        if !skip_advanced {
+            if let Some(decoder_input_cmd) = &config.advanced.decoder.input_cmd {
+                dec_cmd.append(&mut decoder_input_cmd.clone());
+            }
+        } else {
+            // Log informativo
+            info!(target: Target::file_mail(), channel = id;
+                "[play] Tentando decodificação sem recursos avançados para: {}", node.source);
+            
+            // Se estamos em retry, usar decodificação por hardware se possível
+            if let Some(mut filter) = node.filter.clone() {
+                if let Err(e) = modify_decoder_cmd_for_recovery(&mut dec_cmd, &mut filter, id).await {
+                    warn!(target: Target::file_mail(), channel = id;
+                        "[play] Erro ao configurar decodificação por hardware para recuperação: {}", e);
+                } else {
+                    // Atualizar o filtro no nó
+                    //manager.stop(Encoder).await;
+                    //manager.stop(Decoder).await;
+                    node.filter = Some(filter);
+
+                }
+            }
         }
 
         dec_cmd.append(&mut cmd);
 
         if let Some(mut filter) = node.filter {
+            debug!(target: Target::file_mail(), channel = id;
+                "[play] Adicionando filtros - Video chain: {}, Audio chain: {}", 
+                filter.video_chain, filter.audio_chain);
+                
+            debug!(target: Target::file_mail(), channel = id;
+                "[play] Links de saída de vídeo: {:?}", filter.video_out_link);
+                
+            debug!(target: Target::file_mail(), channel = id;
+                "[play] Comando de filtros completo: {:?}", filter.cmd());
+                
+            debug!(target: Target::file_mail(), channel = id;
+                "[play] Comando de mapeamento: {:?}", filter.map());
+                
             dec_cmd.append(&mut filter.cmd());
             dec_cmd.append(&mut filter.map());
         }
-
+        
         if config.processing.vtt_enable && dec_cmd.iter().any(|s| s.ends_with(".vtt")) {
             let i = dec_cmd
                 .iter()
@@ -183,7 +294,95 @@ async fn play(
         drop(decoder_stdout);
 
         manager.wait(Decoder).await;
-        error_decoder_task.await??;
+        
+        match error_decoder_task.await {
+            Ok(Ok(())) => {
+                debug!(target: Target::file_mail(), channel = id;
+                    "[play] Decodificação bem-sucedida para: {}", node.source);
+                    
+                // Se era uma segunda tentativa, remover da lista de retry
+                if manager.recovery_state.is_file_in_retry(&node.source).await {
+                    manager.recovery_state.remove_from_retry(&node.source).await;
+                    debug!(target: Target::file_mail(), channel = id;
+                        "[play] Sucesso na segunda tentativa sem decodificação avançada: {}", node.source);
+                }
+                
+                // Limpar modo de recuperação se estiver ativo
+                if manager.recovery_state.is_in_recovery_mode() {
+                    manager.recovery_state.exit_recovery_mode();
+                }
+            },
+            Ok(Err(ServiceError::DecodingError(msg))) => {
+                // Parar o processo atual
+                //manager.stop(Encoder).await;
+                // Verificar se é a primeira falha deste arquivo
+                if !manager.recovery_state.is_file_in_retry(&node.source).await {
+                    manager.stop(Decoder).await;
+                    // Primeira tentativa falhou - tentar novamente sem decodificação avançada
+                    debug!(target: Target::file_mail(), channel = id;
+                        "[play] Primeiro erro de decodificação - tentando sem recursos avançados: {}: {}", 
+                        node.source, msg);
+
+                    // Obter o índice atual
+                    let current_index = manager.current_index.load(Ordering::SeqCst);
+                    if current_index > 0 {
+                        // Decrementar para que o próximo next() retorne o mesmo arquivo
+                        manager.current_index.store(current_index - 1, Ordering::SeqCst);
+                    }
+                    
+                    // Marcar para retry e definir modo especial de recuperação
+                    manager.recovery_state.mark_file_for_retry(node.source.clone()).await;
+                    
+                    // Não alterar o índice - mesmo arquivo será tentado novamente
+                    // com configurações diferentes
+                    continue;
+                } 
+                // else {
+                //     // Segunda tentativa falhou - substituir por filler
+                //     manager.stop(Decoder).await;
+                //     error!(target: Target::file_mail(), channel = id; 
+                //         "[play] Falha na segunda tentativa - arquivo incompatível: {}: {}", 
+                //         node.source, msg);
+                    
+                //     // Entrar em modo de recuperação completo
+                //     manager.recovery_state.enter_recovery_mode();
+                //     manager.recovery_state.mark_file_incompatible(node.source.clone()).await;
+                    
+                //     // Criar filler substituto com mesma duração
+                //     let mut filler = Media::new(
+                //         node.index.unwrap_or(0), 
+                //         "", 
+                //         false
+                //     ).await;
+                    
+                //     // Preservar parâmetros de tempo do original
+                //     filler.begin = node.begin;
+                //     filler.seek = node.seek;
+                //     filler.out = node.out;
+                //     filler.duration = node.duration;
+                    
+                //     // Substituir o nó atual pelo filler
+                //     *manager.current_media.lock().await = Some(filler.clone());
+                    
+                //     debug!(target: Target::file_mail(), channel = id;
+                //         "[play] Substituindo por filler com duração: {} segundos", 
+                //         filler.out - filler.seek);
+                    
+                //     // Continuar com o filler
+                //     continue;
+                // }
+            },
+            Ok(Err(e)) => {
+                debug!(target: Target::file_mail(), channel = id;
+                    "[play] Erro diferente de DecodingError: {:?}", e);
+                return Err(e);
+            },
+            Err(e) => {
+                debug!(target: Target::file_mail(), channel = id;
+                    "[play] Erro na task de decodificação: {:?}", e);
+                return Err(ServiceError::InternalServerError);
+            },
+        }
     }
 
     Ok(())

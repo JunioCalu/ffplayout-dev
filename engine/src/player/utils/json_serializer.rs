@@ -1,3 +1,58 @@
+// INÍCIO METADADOS CLAUDE
+// Esse é o arquivo '/engine/src/player/utils/json_serializer.rs que eu estou numerando como arquivo número 4'
+// Informações adicionais:
+// - Tamanho sem o cabeçalho Claude: 6579 bytes
+// - Número de linhas sem o cabeçalho Claude: 215
+// - Status Git: Modified (modificado mas não adicionado ao staging)
+// - Branch atual: skip_clip_on_cuda_decoder_error
+// - Última modificação: Sun Jan 19 20:51:27 2025 +0100
+// - Possível propósito: Processamento de mídia
+//
+// Documentação da struct:
+// This is our main playlist object, it holds all necessary information for the current day.
+// #[derive(Debug, Serialize, Deserialize, Clone)]
+//
+// RESUMO ESTRUTURAL:
+// --------------------------------------------------
+// Estruturas (structs):
+// - pub struct JsonPlaylist {
+//
+// Enumerações (enums):
+// - Nenhuma enum definido neste arquivo
+//
+// Traits:
+// - Nenhuma trait definida neste arquivo
+//
+// Funções por categoria:
+// Funções de inicialização:
+// - pub fn new(date: String, start: f64) -> Self {
+//
+// Outras funções:
+// - fn eq(&self, other: &Self) -> bool {
+// - fn default_channel() -> String {
+// - pub fn set_defaults(playlist: &mut JsonPlaylist) {
+// - pub async fn read_json(
+//
+// Dependências (imports completos):
+// - use std::{
+//   path::Path,
+//   sync::{atomic::AtomicBool, Arc},
+//   };
+// - use log::*;
+// - use serde::{Deserialize, Serialize};
+// - use tokio::{fs::File, io::AsyncReadExt, sync::Mutex};
+// - use crate::{player::utils::{
+//   get_date, is_remote, json_validate::validate_playlist, modified_time, time_from_header, Media,
+//   PlayoutConfig,
+//   }, utils::recovery::ChannelRecoveryState};
+// - use crate::utils::{config::DUMMY_LEN, logging::Target};
+// --------------------------------------------------
+//
+// Este comentário foi adicionado automaticamente para facilitar 
+// o entendimento do contexto do projeto por sistemas de IA como o Claude.
+// FIM METADADOS CLAUDE
+//
+
 use std::{
     path::Path,
     sync::{atomic::AtomicBool, Arc},
@@ -7,10 +62,10 @@ use log::*;
 use serde::{Deserialize, Serialize};
 use tokio::{fs::File, io::AsyncReadExt, sync::Mutex};
 
-use crate::player::utils::{
+use crate::{player::utils::{
     get_date, is_remote, json_validate::validate_playlist, modified_time, time_from_header, Media,
     PlayoutConfig,
-};
+}, utils::recovery::ChannelRecoveryState};
 use crate::utils::{config::DUMMY_LEN, logging::Target};
 
 /// This is our main playlist object, it holds all necessary information for the current day.
@@ -98,6 +153,7 @@ pub async fn read_json(
     is_alive: Arc<AtomicBool>,
     seek: bool,
     get_next: bool,
+    recovery_state: Arc<ChannelRecoveryState>,
 ) -> JsonPlaylist {
     let id = config.general.channel_id;
     let config_clone = config.clone();
@@ -150,6 +206,7 @@ pub async fn read_json(
                             current_list,
                             list_clone,
                             is_alive,
+                            recovery_state,
                         ));
                     }
 
@@ -197,6 +254,7 @@ pub async fn read_json(
                 current_list,
                 list_clone,
                 is_alive,
+                recovery_state,
             ));
         }
 

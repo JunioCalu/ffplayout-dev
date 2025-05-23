@@ -1,0 +1,879 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 4b7ce718..638d9cb3 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1408,6 +1408,7 @@ dependencies = [
+  "nix",
+  "notify",
+  "notify-debouncer-full",
++ "once_cell",
+  "paris",
+  "path-clean",
+  "rand 0.9.0",
+@@ -2646,9 +2647,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "once_cell"
+-version = "1.20.2"
++version = "1.20.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1261fe7e33c73b354eab43b1273a57c8f967d0391e80353e51f764ac02cf6775"
++checksum = "945462a4b81e43c4e3ba96bd7b49d834c6f61198356aa858733bc4acf3cbe62e"
+ 
+ [[package]]
+ name = "paris"
+diff --git a/engine/Cargo.toml b/engine/Cargo.toml
+index 68f3c384..27b674f3 100644
+--- a/engine/Cargo.toml
++++ b/engine/Cargo.toml
+@@ -66,6 +66,7 @@ zeromq = { version = "0.4", default-features = false, features = [
+     "tcp-transport",
+ ] }
+ derive_more = { version = "2.0.1", features = ["is_variant", "display"] }
++once_cell = "1.20.3"
+ 
+ [build-dependencies]
+ static-files = "0.2"
+diff --git a/engine/src/player/input/playlist.rs b/engine/src/player/input/playlist.rs
+index c74b9d24..d4b5b784 100644
+--- a/engine/src/player/input/playlist.rs
++++ b/engine/src/player/input/playlist.rs
+@@ -22,8 +111,13 @@ use crate::player::{
+ use crate::utils::{
+     config::{PlayoutConfig, IMAGE_FORMAT},
+     logging::Target,
++    recovery::{
++        exit_recovery_mode, 
++        is_in_recovery_mode,
++    },
+ };
+ 
++
+ /// Struct for current playlist.
+ ///
+ /// Here we prepare the init clip and build a iterator where we pull our clips.
+@@ -209,24 +303,35 @@ impl CurrentProgram {
+     }
+ 
+     async fn set_status(&mut self, date: &Option<String>, shift: f64) {
+-        let mut time_shift = shift;
+-
+-        if self.manager.channel.lock().await.last_date != *date
++        let time_shift = if is_in_recovery_mode() {
++            // Preferimos NÃO IGNORAR completamente o time_shift durante recuperação,
++            // mas SIM evitar ADICIONAR NOVOS ajustes durante esse período.
++            // Isso manterá a sincronização atual sem pioras.
++            self.manager.channel.lock().await.time_shift  // Manter o time_shift atual
++        } else {
++            // Processamento normal, permitindo ajustes
++            shift
++        };
++        
++        // Nota: não precisamos de time_shift mutável agora, pois seu valor já foi determinado acima
++        let final_shift = if self.manager.channel.lock().await.last_date != *date
+             && self.manager.channel.lock().await.time_shift != 0.0
+         {
+-            time_shift = 0.0;
+             info!(target: Target::file_mail(), channel = self.channel_id; "Reset playout status");
+-        }
+-
++            0.0
++        } else {
++            time_shift
++        };
++    
+         if let Some(d) = date {
+             self.manager.current_date.lock().await.clone_from(d);
+             self.manager.channel.lock().await.last_date.clone_from(date);
+         }
+-
+-        self.manager.channel.lock().await.time_shift = time_shift;
+-
++    
++        self.manager.channel.lock().await.time_shift = final_shift;
++    
+         if let Err(e) =
+-            handles::update_stat(&self.manager.db_pool, self.channel_id, date, time_shift).await
++            handles::update_stat(&self.manager.db_pool, self.channel_id, date, final_shift).await
+         {
+             error!(target: Target::file_mail(), channel = self.channel_id; "Unable to write status: {e}");
+         };
+@@ -264,25 +369,27 @@ impl CurrentProgram {
+     // On init or reload we need to seek for the current clip.
+     async fn get_current_clip(&mut self) {
+         let mut time_sec = self.get_current_time();
++        
++        // Aplicando a verificação de modo de recuperação aqui
+         let shift = self.manager.channel.lock().await.time_shift;
+-
++    
+         if shift != 0.0 {
+             info!(target: Target::file_mail(), channel = self.channel_id; "Shift playlist start for <yellow>{shift:.3}</> seconds");
+             time_sec += shift;
+         }
+-
++    
+         if self.config.playlist.infinit
+             && self.json_playlist.length.unwrap() < 86400.0
+             && time_sec > self.json_playlist.length.unwrap() + self.start_sec
+         {
+             self.recalculate_begin(true).await;
+         }
+-
++    
+         for (i, item) in self.manager.current_list.lock().await.iter().enumerate() {
+             if item.begin.unwrap() + item.out - item.seek > time_sec {
+                 self.manager.list_init.store(false, Ordering::SeqCst);
+                 self.manager.current_index.store(i, Ordering::SeqCst);
+-
++    
+                 break;
+             }
+         }
+@@ -291,49 +398,91 @@ impl CurrentProgram {
+     // Prepare init clip.
+     async fn init_clip(&mut self) -> bool {
+         trace!("init_clip");
++        // debug!(target: Target::file_mail(), channel = id;
++        // "[play] Retomando operação após pausa - arquivo será substituído por filler");
+         self.get_current_clip().await;
+         let mut is_filler = false;
+-
++    
+         if !self.manager.list_init.load(Ordering::SeqCst) {
+-            let time_sec = self.get_current_time();
++            let time_sec_opt = self.get_current_time();
+             let index = self.manager.current_index.load(Ordering::SeqCst);
++    
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++                "[init_clip] Processando index: {} no tempo: {}", index, time_sec_opt);
++    
+             let nodes = self.manager.current_list.lock().await;
+             let last_index = nodes.len() - 1;
+-
++    
+             // de-instance node to preserve original values in list
+             let mut node_clone = nodes[index].clone();
+-
++    
+             // Important! When no manual drop is happen here, lock is still active in handle_list_init
+             drop(nodes);
+-
++    
+             trace!("Clip from init: {}", node_clone.source);
++    
++            if is_in_recovery_mode() {
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[init_clip] Substituindo arquivo incompatível: {} por filler", 
++                    node_clone.source);
++
++                let mut media = Media::new(index, "", false, Some(self.manager.clone().into())).await;
++                            
++                // Copiar EXATAMENTE todos os atributos temporais
++                media.probe = None;
++                media.begin = node_clone.begin;
++                media.seek = node_clone.seek;
++                media.out = node_clone.out;
++                media.duration = node_clone.duration;
++
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[init_clip] Atributos temporais do original: begin={}, seek={}, duration={}, out={}",
++                    node_clone.begin.unwrap_or_default(), node_clone.seek, node_clone.duration, node_clone.out);
++                
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[init_clip] Criando filler com duração exata de {} segundos e begin: {}", 
++                    media.out - media.seek, media.begin.unwrap_or_default());
++                
++                // Garantir que list_init permaneça false
++                self.manager.list_init.store(false, Ordering::SeqCst);
++                
++                let last_index = self.manager.current_list.lock().await.len() - 1;
++                self.gen_source(media, last_index).await;
+ 
+-            node_clone.seek += time_sec
+-                - (node_clone.begin.unwrap() - self.manager.channel.lock().await.time_shift);
+-
++                exit_recovery_mode();
++                
++                return true;
++            }
++    
++
++            let time_value = time_sec_opt;
++            node_clone.seek += time_value - (node_clone.begin.unwrap() - self.manager.channel.lock().await.time_shift);
++            
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++                "[init_clip] Seek ajustado para: {}", node_clone.seek);
++                
+             self.last_next_ad(&mut node_clone).await;
+-
+             self.manager.current_index.fetch_add(1, Ordering::SeqCst);
+-
+             self.handle_list_init(node_clone, last_index).await;
+-
+-            if self
+-                .current_node
+-                .source
+-                .contains(&self.config.channel.storage.to_string_lossy().to_string())
+-                || self.current_node.source.contains("color=c=#121212")
+-            {
+-                is_filler = true;
+-            }
+-        }
+-
++    
++            // Em vez da condição atual, usar algo como:
++            if self.current_node.source.is_empty() && self.current_node.duration > 0.0  // Filler de substituição
++                || self.current_node.source.contains("color=c=#121212")  // Filler de cor
++                || self.current_node.source == self.config.storage.filler_path.to_string_lossy()  // Filler específico
++                || self.current_node.source.contains("/filler/") // Diretório de fillers
++                {
++                    debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[init_clip] Detectado filler: {}", self.current_node.source);
++                    is_filler = true;
++                }
++        } 
+         is_filler
+     }
+ 
+     async fn fill_end(&mut self, total_delta: f64) {
+         // Fill end from playlist
+         let index = self.manager.current_index.load(Ordering::SeqCst);
+-        let mut media = Media::new(index, "", false).await;
++        let mut media = Media::new(index, "", false, Some(self.manager.clone().into())).await;
+         media.begin = Some(time_in_seconds(&self.config.channel.timezone));
+         media.duration = total_delta;
+         media.out = total_delta;
+@@ -491,39 +637,39 @@ impl CurrentProgram {
+         {
+             // when we are in the 24 hour range, get the clip
+             self.gen_source(node, last_index).await;
+-
+-            return;
++            return Some(()); // Modificado para retornar Some(())
+         } else if total_delta <= 0.0 {
+             info!(target: Target::file_mail(), channel = self.channel_id; "Begin is over play time, skip: {}", node.source);
+         } else if total_delta < node.duration - node.seek || last {
+             self.handle_list_end(node, total_delta, last_index).await;
+-
+-            return;
++            return Some(()); // Modificado para retornar Some(())
+         }
+ 
+         node.skip = true;
+         self.current_node = node;
++        
++        Some(()) // Retorno ao final da função
+     }
+ 
+     /// Generate the source CMD, or when clip not exist, get a dummy.
+     pub async fn gen_source(&mut self, mut node: Media, last_index: usize) {
+         let node_index = node.index.unwrap_or_default();
+-        let duration = node.out - node.seek;
+-
+-        if node.duration > 0.0 && duration < 1.0 {
++        let original_duration = node.out - node.seek;  // Preservar a duração original desejada
++    
++        if node.duration > 0.0 && original_duration < 1.0 {
+             warn!(
+                 target: Target::file_mail(), channel = self.channel_id;
+-                "Skip clip that is less then one second long (<yellow>{duration:.3}</>)."
++                "Skip clip that is less then one second long (<yellow>{original_duration:.3}</>)."
+             );
+-
++    
+             // INFO:
+             // This part has been changed twice, the last time in January 2024.
+             // Better case is that it skips the short clip, especially when reloading a playlist,
+             // it prevents the last clip from playing again for 1.2 seconds.
+             // But the behavior needs to be observed for a longer time to be sure that it has no side effects.
+-
++    
+             // duration = 1.2;
+-
++    
+             // if node.seek > 1.0 {
+             //     node.seek -= 1.2;
+             // } else {
+@@ -531,15 +677,15 @@ impl CurrentProgram {
+             // }
+             node.skip = true;
+         }
+-
+-        trace!("Clip length: {duration}, duration: {}", node.duration);
+-
++    
++        trace!("Clip length: {original_duration}, duration: {}", node.duration);
++    
+         if node.probe.is_none() && !node.source.is_empty() {
+             if let Err(e) = node.add_probe(true).await {
+                 trace!("{e:?}");
+             };
+         }
+-
++    
+         // separate if condition, because of node.add_probe() in last condition
+         if node.probe.is_some() {
+             if node
+@@ -555,59 +701,61 @@ impl CurrentProgram {
+                     warn!(target: Target::file_mail(), channel = self.channel_id; "Clip loops and has seek value: duplicate clip to separate loop and seek.");
+                     self.duplicate_for_seek_and_loop(&mut node).await;
+                 }
+-
++    
+                 node.cmd = Some(seek_and_length(&self.config, &mut node));
+             }
+         } else {
+             trace!("clip index: {node_index} | last index: {last_index}");
+-
++    
+             // Last index is the index from the last item from the node list.
+             if node_index < last_index {
+                 error!(target: Target::file_mail(), channel = self.channel_id; "Source not found: <b><magenta>{}</></b>", node.source);
+             }
+-
++    
+             let fillers = self.manager.filler_list.lock().await;
+-
+-            // Set list_init to true, to stay in sync.
+-            self.manager.list_init.store(true, Ordering::SeqCst);
+-
+-            if self
+-                .manager
+-                .storage
+-                .lock()
+-                .await
+-                .is_dir(&self.config.storage.filler_path)
+-                && !fillers.is_empty()
+-            {
++    
++            if self.config.storage.filler_path.is_dir() && !fillers.is_empty() {
+                 let mut index = self.manager.filler_index.fetch_add(1, Ordering::SeqCst);
+-
++    
+                 if index > fillers.len() - 1 {
+                     index = 0;
+                 }
+-
++    
+                 let mut filler_media = fillers[index].clone();
+-
++                
++                // Log para diagnóstico
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[gen_source] Filler selecionado - source: {}, duration: {}, duração necessária: {}", 
++                    filler_media.source, filler_media.duration, original_duration);
++    
+                 trace!("take filler: {}", filler_media.source);
+-
++    
+                 if index == fillers.len() - 1 {
+                     // reset index for next round
+                     self.manager.filler_index.store(0, Ordering::SeqCst);
+                 }
+-
++    
+                 if filler_media.probe.is_none() {
+                     if let Err(e) = filler_media.add_probe(false).await {
+                         error!(target: Target::file_mail(), channel = self.channel_id; "{e:?}");
+                     };
+                 }
+-
+-                if node.duration > 0.0 && filler_media.duration > duration {
+-                    filler_media.out = duration;
+-                }
+-
++    
++                // CORREÇÃO CRÍTICA: Preservar a duração original ao criar o filler
+                 node.source = filler_media.source;
+                 node.seek = 0.0;
+-                node.out = filler_media.out;
++                
++                // Preservar a duração original no out
++                node.out = original_duration;
++                
++                // Manter a duração real do filler para que o cálculo de loop_count funcione
+                 node.duration = filler_media.duration;
++                
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[gen_source] Configurando filler - duração original: {}, duração do filler: {}, loop necessário: {}",
++                    original_duration, filler_media.duration, 
++                    if filler_media.duration > 0.0 { (original_duration / filler_media.duration).ceil() } else { 1.0 });
++                
+                 node.cmd = Some(loop_filler(&self.config, &node));
+                 node.probe = filler_media.probe;
+             } else {
+@@ -632,13 +780,7 @@ impl CurrentProgram {
+                             node.cmd = Some(loop_image(&self.config, &node));
+                             node.probe = Some(probe);
+                         } else if let Some(filler_duration) = probe.clone().format.duration {
+-                            // Create placeholder from config filler.
+-                            let filler_out = if node.duration == 0.0 {
+-                                filler_duration
+-                            } else {
+-                                filler_duration.min(duration)
+-                            };
+-
++                            // CORREÇÃO: Preservar a duração original aqui também
+                             node.source = self
+                                 .config
+                                 .storage
+@@ -647,13 +789,13 @@ impl CurrentProgram {
+                                 .to_string_lossy()
+                                 .to_string();
+                             node.seek = 0.0;
+-                            node.out = filler_out;
+-                            node.duration = filler_duration;
++                            node.out = original_duration;  // Usar a duração original
++                            node.duration = filler_duration;  // Manter a duração real do filler
+                             node.cmd = Some(loop_filler(&self.config, &node));
+                             node.probe = Some(probe);
+                         } else {
+                             // Create colored placeholder.
+-                            let (source, cmd) = gen_dummy(&self.config, duration);
++                            let (source, cmd) = gen_dummy(&self.config, original_duration);  // Usar duração original
+                             node.source = source;
+                             node.cmd = Some(cmd);
+                         }
+@@ -661,40 +803,38 @@ impl CurrentProgram {
+                     Err(e) => {
+                         // Create colored placeholder.
+                         error!(target: Target::file_mail(), channel = self.channel_id; "Filler error: {e}");
+-
+-                        let mut dummy_duration = 60.0;
+-
+-                        if node.duration > 0.0 && dummy_duration > duration {
+-                            dummy_duration = duration;
+-                        }
+-
+-                        let (source, cmd) = gen_dummy(&self.config, dummy_duration);
++    
++                        // Usar a duração original aqui também
++                        let (source, cmd) = gen_dummy(&self.config, original_duration);
+                         node.seek = 0.0;
+-                        node.out = dummy_duration;
+-                        node.duration = dummy_duration;
++                        node.out = original_duration;
++                        node.duration = original_duration;  // Para placeholders coloridos, a duração é a mesma
+                         node.source = source;
+                         node.cmd = Some(cmd);
+                     }
+                 }
+             }
+-
++    
+             warn!(
+                 target: Target::file_mail(), channel = self.channel_id;
+-                "Generate filler with <yellow>{:.2}</> seconds length!",
+-                node.out
++                "Generate filler with <yellow>{:.2}</> seconds length! Duração original: <yellow>{:.2}</>, Loop configurado: {}",
++                node.out,
++                original_duration,
++                node.cmd.as_ref().map_or(false, |cmd| cmd.join(" ").contains("-stream_loop"))
+             );
+         }
+-
++    
+         node.add_filter(&self.config, &self.manager.filter_chain.clone())
+             .await;
+-
++    
+         trace!(
+-            "return gen_source: {}, seek: {}, out: {}",
++            "return gen_source: {}, seek: {}, out: {}, duration: {}",
+             node.source,
+             node.seek,
+             node.out,
++            node.duration
+         );
+-
++    
+         self.current_node = node;
+     }
+
+@@ -778,10 +918,17 @@ impl CurrentProgram {
+             < self.manager.current_list.lock().await.len()
+         {
+             // get next clip from current playlist
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++            "[next] Branch normal de processamento de arquivo");
+ 
+             let mut is_last = false;
+             let index = self.manager.current_index.load(Ordering::SeqCst);
++
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++            "[next] Processando index: {}", index);
++
+             let node_list = self.manager.current_list.lock().await;
++
+             let mut node = node_list[index].clone();
+             let last_index = node_list.len() - 1;
+ 
+@@ -789,6 +936,8 @@ impl CurrentProgram {
+ 
+             if index == last_index {
+                 is_last = true;
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                "[next] Processando último arquivo da lista");
+             }
+ 
+             self.last_next_ad(&mut node).await;
+@@ -805,12 +954,20 @@ impl CurrentProgram {
+                 // Playlist is to early finish,
+                 // and if we have to fill it with a placeholder.
+                 trace!("Total delta on list end: {total_delta}");
++            
++                debug!(target: Target::file_mail(), channel = self.channel_id;
++                    "[next] Preenchendo fim da playlist com placeholder, total_delta = {}", 
++                    total_delta);
++
++                trace!("Total delta on list end: {total_delta}");
+ 
+                 self.fill_end(total_delta).await;
+ 
+                 return Some(self.current_node.clone());
+             }
+             // Get first clip from next playlist.
++            debug!(target: Target::file_mail(), channel = self.channel_id;
++            "[next] Obtendo primeiro clip da próxima playlist");
+ 
+             let c_list = self.manager.current_list.lock().await;
+             let mut first_node = c_list[0].clone();
+diff --git a/engine/src/player/output/mod.rs b/engine/src/player/output/mod.rs
+index e16b31af..42634df2 100644
+--- a/engine/src/player/output/mod.rs
++++ b/engine/src/player/output/mod.rs
+@@ -14,13 +72,19 @@ mod stream;
+ use crate::player::{
+     controller::{ChannelManager, ProcessUnit::*},
+     input::{ingest_server, source_generator},
+-    utils::{sec_to_time, stderr_reader},
++    utils::{sec_to_time, stderr_reader, Media},
+ };
+ use crate::utils::{
+     config::OutputMode::*,
+     errors::ServiceError,
+     logging::{fmt_cmd, Target},
+     task_runner,
++    recovery::{
++        enter_recovery_mode,
++        exit_recovery_mode, 
++        is_in_recovery_mode,
++        mark_file_incompatible,
++    },
+ };
+ use crate::vec_strings;
+ 
+@@ -56,6 +120,29 @@ async fn play(
+             None => break,
+         };
+ 
++        // ADICIONADO: Log para analisar a duração e comando
++        debug!(target: Target::file_mail(), channel = id;
++            "[play] Analisando comando de decoder - duração calculada: {}, duração do arquivo: {}, out: {}, seek: {}, -t no comando: {}, comando contém stream_loop? {}",
++            node.out - node.seek,
++            node.duration,
++            node.out,
++            node.seek,
++            cmd.join(" ").contains(" -t "),
++            cmd.join(" ").contains("-stream_loop")
++        );
++
++        // ADICIONADO: Log para analisar parâmetros exatos de -t
++        if let Some(t_pos) = cmd.iter().position(|arg| arg == "-t") {
++            if t_pos + 1 < cmd.len() {
++                debug!(target: Target::file_mail(), channel = id;
++                    "[play] Valor de -t no comando: {}", cmd[t_pos + 1]);
++            }
++        }
++
++        // ADICIONADO: Log para ver o comando completo
++        debug!(target: Target::file_mail(), channel = id;
++            "[play] Comando completo: {}", cmd.join(" "));
++
+         if node.skip {
+             // skip is different from node.cmd = None.
+             // This source is valid, but too short to play,
+@@ -183,7 +270,64 @@ async fn play(
+         drop(decoder_stdout);
+ 
+         manager.wait(Decoder).await;
+-        error_decoder_task.await??;
++        
++        match error_decoder_task.await {
++            Ok(Ok(())) => {
++                debug!(target: Target::file_mail(), channel = id;
++                    "[play] Decodificação bem-sucedida para: {}", node.source);
++
++                if is_in_recovery_mode() {
++                    debug!(target: Target::file_mail(), channel = id;
++                        "[play] Saindo do modo de recuperação após substituição por filler bem-sucedida");
++                    exit_recovery_mode();
++                }
++            },
++            Ok(Err(ServiceError::DecodingError(msg))) => {
++                error!(target: Target::file_mail(), channel = id; 
++                "Arquivo incompatível detectado: {}: {}", node.source, msg);
++                
++                // Entrar em modo de recuperação
++                enter_recovery_mode();
++                
++                // Marcar arquivo como incompatível
++                mark_file_incompatible(node.source.clone());
++                
++                // Criar filler substituto IMEDIATO com mesma duração
++                let mut filler = Media::new(
++                    node.index.unwrap_or(0), 
++                    "", 
++                    false, 
++                    Some(manager.clone().into())
++                ).await;
++                
++                // Copiar atributos temporais manualmente em vez de clonar
++                filler.begin = node.begin;
++                filler.seek = node.seek;
++                filler.out = node.out;
++                filler.duration = node.duration;
++                filler.probe = None;
++                
++                // Manter próxima iteração com o filler, não reiniciar a playlist
++                *manager.current_media.lock().await = Some(filler.clone());
++                
++                debug!(target: Target::file_mail(), channel = id;
++                    "[play] Substituindo arquivo problemático por filler com duração idêntica: {} segundos", 
++                    filler.out - filler.seek);
++                
++                // Continuar com o filler recém-criado
++                continue;
++            },
++            Ok(Err(e)) => {
++                debug!(target: Target::file_mail(), channel = id;
++                    "[play] Erro diferente de DecodingError: {:?}", e);
++                return Err(e);
++            },
++            Err(e) => {
++                debug!(target: Target::file_mail(), channel = id;
++                    "[play] Erro na task de decodificação: {:?}", e);
++                return Err(ServiceError::InternalServerError);
++            },
++        }
+     }
+ 
+     Ok(())
+diff --git a/engine/src/player/utils/json_validate.rs b/engine/src/player/utils/json_validate.rs
+index 650a0916..6600085b 100644
+--- a/engine/src/player/utils/json_validate.rs
++++ b/engine/src/player/utils/json_validate.rs
+@@ -23,6 +87,11 @@ use crate::utils::{
+     config::{OutputMode::Null, PlayoutConfig, FFMPEG_IGNORE_ERRORS, IMAGE_FORMAT},
+     errors::ProcessError,
+     logging::Target,
++    recovery::{
++        mark_file_incompatible,
++        is_file_incompatible,
++
++    },
+ };
+ use crate::vec_strings;
+ 
+@@ -185,22 +254,54 @@ pub async fn validate_playlist(
+             return;
+         }
+ 
++        //Verificar se já é conhecido como incompatível
++        let is_incompatible = {
++            is_file_incompatible(&item.source)
++        };
++
++        if is_incompatible {
++            // debug!(target: Target::file_mail(), channel = id;
++            //     "[Validation] Pulando arquivo incompatível conhecido: {}", 
++            //     item.source
++            // );
++            continue;
++        }
++
+         let pos = index + 1;
+ 
+         if !is_remote(&item.source) {
+-            if item.audio.is_empty() {
+-                if let Err(e) = item.add_probe(false).await {
++            // VERIFICAÇÃO ADICIONAL antes de tentar add_probe
++            let is_now_incompatible = {
++                is_file_incompatible(&item.source)
++            };
++            
++            if is_now_incompatible {
++                // debug!(target: Target::file_mail(), channel = id;
++                //     "[Validation] Evitando add_probe em arquivo incompatível: {}", 
++                //     item.source
++                // );
++                continue;
++            }
++                if item.audio.is_empty() {
++                    if let Err(e) = item.add_probe(false).await {
++                        error!(target: Target::file_mail(), channel = id;
++                            "[Validation] Error on position <yellow>{pos:0>3}</> - <yellow>{}</>: {e}",
++                            sec_to_time(begin)
++                        );
++
++                        // Adiciona à lista de incompatíveis
++                        mark_file_incompatible(item.source.clone());
++                        continue;
++                    }
++                } else if let Err(e) = item.add_probe(true).await {
+                     error!(target: Target::file_mail(), channel = id;
+                         "[Validation] Error on position <yellow>{pos:0>3}</> - <yellow>{}</>: {e}",
+                         sec_to_time(begin)
+                     );
++                    // Adiciona à lista de incompatíveis
++                    mark_file_incompatible(item.source.clone());
++                    continue;
+                 }
+-            } else if let Err(e) = item.add_probe(true).await {
+-                error!(target: Target::file_mail(), channel = id;
+-                    "[Validation] Error on position <yellow>{pos:0>3}</> - <yellow>{}</>: {e}",
+-                    sec_to_time(begin)
+-                );
+-            }
+         }
+ 
+         if item.probe.is_some() {
+diff --git a/engine/src/player/utils/mod.rs b/engine/src/player/utils/mod.rs
+index b086eeef..eacd0c81 100644
+--- a/engine/src/player/utils/mod.rs
++++ b/engine/src/player/utils/mod.rs
+@@ -38,10 +276,11 @@ use crate::player::{
+     filter::{filter_chains, Filters},
+ };
+ use crate::utils::{
+-    config::{OutputMode::*, PlayoutConfig, FFMPEG_IGNORE_ERRORS, FFMPEG_UNRECOVERABLE_ERRORS},
++    config::{OutputMode::*, PlayoutConfig, FFMPEG_IGNORE_ERRORS, FFMPEG_UNRECOVERABLE_ERRORS, FFMPEG_DECODING_ERRORS},
+     errors::ServiceError,
+     logging::Target,
+     time_machine::time_now,
++    recovery::is_in_recovery_mode,
+ };
+ pub use json_serializer::{read_json, JsonPlaylist};
+  
+@@ -539,6 +783,9 @@ pub fn sum_durations(clip_list: &[Media]) -> f64 {
+ ///
+ /// We also get here the global delta between clip start and time when a new playlist should start.
+ pub fn get_delta(config: &PlayoutConfig, begin: &f64) -> (f64, f64) {
++    // Check if in recovery mode
++    let in_recovery = is_in_recovery_mode();
++    
+     let mut current_time = time_in_seconds(&config.channel.timezone);
+     let start = config.playlist.start_sec.unwrap();
+     let length = config.playlist.length_sec.unwrap_or(86400.0);
+@@ -554,6 +801,7 @@ pub fn get_delta(config: &PlayoutConfig, begin: &f64) -> (f64, f64) {
+         current_time += 86400.0;
+     }
+ 
++    // Calculate normal delta
+     let mut current_delta = begin - current_time;
+ 
+     if is_close(
+@@ -564,6 +812,25 @@ pub fn get_delta(config: &PlayoutConfig, begin: &f64) -> (f64, f64) {
+         current_delta = current_delta.abs() - 86400.0;
+     }
+ 
++    // During recovery mode, we want to maintain stable timing
++    if in_recovery {
++        // Optionally log that we're using stable timing during recovery
++        trace!(
++            "In recovery mode: stabilizing delta calculation (raw delta: {:.3})",
++            current_delta
++        );
++        
++        // Handle the special case when current_delta is exactly zero
++        if current_delta != 0.0 {
++            // Only adjust non-zero deltas
++            // Use a near-zero delta with the original sign preserved
++            current_delta = if current_delta > 0.0 { 0.001 } else { -0.001 };
++        }
++        // If current_delta is 0.0, keep it as is - perfect synchronization
++    }
++
++    // Calculate total_delta normally - this affects playlist progression
++    // which should continue even during recovery
+     let total_delta = if current_time < start {
+         start - current_time
+     } else {
+@@ -883,6 +1150,21 @@ pub async fn stderr_reader(
+                 line.replace("[error] ", "").replace("[fatal] ", "")
+             );
+ 
++            if FFMPEG_DECODING_ERRORS.iter().any(|e| line.contains(e)) {
++                // Adicionar em stderr_reader ao detectar erro de decodificação
++                // debug!(target: Target::file_mail(), channel = channel_id;
++                //     "[stderr_reader] Erro de decodificação encontrado: {} - substituindo por filler com duração exata", 
++                //     line.replace("[error] ", "").replace("[fatal] ", ""));
++
++                // // Adicionar em play ao adicionar arquivo à lista de incompatíveis
++                // debug!(target: Target::file_mail(), channel = channel_id;
++                //     "[play] Arquivo marcado como incompatível: - será substituído por filler com duração idêntica"
++                // );
++                return Err(ServiceError::DecodingError(
++                    format!("Erro de decodificação: {}", line.replace("[error] ", "").replace("[fatal] ", ""))
++                 ));
++            }
++
+             if FFMPEG_UNRECOVERABLE_ERRORS
+                 .iter()
+                 .any(|i| line.contains(*i))
+diff --git a/engine/src/utils/config.rs b/engine/src/utils/config.rs
+index aa15679b..354fe2cc 100644
+--- a/engine/src/utils/config.rs
++++ b/engine/src/utils/config.rs
+@@ -58,6 +151,14 @@ pub const FFMPEG_UNRECOVERABLE_ERRORS: [&str; 9] = [
+     "Option not found",
+ ];
+ 
++pub const FFMPEG_DECODING_ERRORS: [&str; 5] = [
++    "no frame",
++    "CUDA_ERROR_OUT_OF_MEMORY",
++    "CUDA_ERROR_INVALID_VALUE",
++    "CUDA_ERROR_INVALID_CONTEXT",
++    "No device available for decoder",
++];
++
+ #[derive(Debug, Clone, Default, Eq, PartialEq, Deserialize, Serialize, TS)]
+ #[ts(export, export_to = "playout_config.d.ts")]
+ #[serde(rename_all = "lowercase")]
+diff --git a/engine/src/utils/errors.rs b/engine/src/utils/errors.rs
+index 1bd6fac1..19d72bff 100644
+--- a/engine/src/utils/errors.rs
++++ b/engine/src/utils/errors.rs
+@@ -27,6 +89,9 @@ pub enum ServiceError {
+ 
+     #[display("ServiceUnavailable: {_0}")]
+     ServiceUnavailable(String),
++
++    #[display("DecodingError: {_0}")]
++    DecodingError(String),
+ }
+ 
+ // impl ResponseError trait allows to convert our errors into http responses with appropriate data
+@@ -43,6 +108,9 @@ impl ResponseError for ServiceError {
+             Self::NoContent(ref message) => HttpResponse::NoContent().json(message),
+             Self::ServiceUnavailable(ref message) => {
+                 HttpResponse::ServiceUnavailable().json(message)
++            },
++            Self::DecodingError(ref message) => {
++                HttpResponse::UnprocessableEntity().json(message)
+             }
+         }
+     }
+diff --git a/engine/src/utils/mod.rs b/engine/src/utils/mod.rs
+index b1b616ba..cc8e5e09 100644
+--- a/engine/src/utils/mod.rs
++++ b/engine/src/utils/mod.rs
+@@ -28,6 +93,7 @@ pub mod playlist;
+ pub mod system;
+ pub mod task_runner;
+ pub mod time_machine;
++pub mod recovery;
+ 
+ use crate::db::GLOBAL_SETTINGS;
+ use crate::player::utils::time_to_sec;

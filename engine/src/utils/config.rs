@@ -1,3 +1,96 @@
+// INÍCIO METADADOS CLAUDE
+// Esse é o arquivo '/engine/src/utils/config.rs que eu estou numerando como arquivo número 13'
+// Informações adicionais:
+// - Tamanho sem o cabeçalho Claude: 30564 bytes
+// - Número de linhas sem o cabeçalho Claude: 970
+// - Status Git: Modified (modificado mas não adicionado ao staging)
+// - Branch atual: skip_clip_on_cuda_decoder_error
+// - Última modificação: Tue Feb 11 12:43:28 2025 +0100
+// - Possível propósito: Configuração, Acesso a dados, Processamento de mídia
+//
+// Documentação da struct:
+// Channel Config
+// 
+// This we init ones, when ffplayout is starting and use them globally in the hole program.
+// #[derive(Debug, Default, Clone, Deserialize, Serialize, TS)]
+// #[ts(export, export_to = "playout_config.d.ts")]
+//
+// RESUMO ESTRUTURAL:
+// --------------------------------------------------
+// Estruturas (structs):
+// - pub struct Template {
+// - pub struct Source {
+// - pub struct PlayoutConfig {
+// - pub struct Channel {
+// - pub struct General {
+// - pub struct Mail {
+// - pub struct Logging {
+// - pub struct Processing {
+// - pub struct Ingest {
+// - pub struct Playlist {
+// - pub struct Storage {
+// - pub struct Text {
+// - pub struct Task {
+// - pub struct Output {
+//
+// Enumerações (enums):
+// - pub enum OutputMode {
+// - pub enum ProcessMode {
+//
+// Traits:
+// - Nenhuma trait definida neste arquivo
+//
+// Funções por categoria:
+// Funções de inicialização:
+// - fn new(s: &str) -> Self {
+// - pub fn new(config: &models::GlobalSettings, channel: models::Channel) -> Self {
+// - fn new(config: &models::Configuration) -> Self {
+// - fn new(global: &models::GlobalSettings, config: &models::Configuration) -> Self {
+// - fn new(config: &models::Configuration, path: PathBuf, shared_storage: bool) -> Self {
+// - pub async fn new(pool: &Pool<Sqlite>, channel_id: i32) -> Result<Self, ServiceError> {
+//
+// Outras funções:
+// - fn from_str(input: &str) -> Result<Self, Self::Err> {
+// - fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+// - fn default() -> Self {
+// - pub fn string_to_log_level(l: String) -> Level {
+// - pub fn string_to_processing_mode(l: String) -> ProcessMode {
+// - pub fn string_to_output_mode(l: String) -> OutputMode {
+// - fn default_track_index() -> i32 {
+// - pub async fn dump(pool: &Pool<Sqlite>, id: i32) -> Result<(), ServiceError> {
+// - pub async fn import(pool: &Pool<Sqlite>, id: i32, path: &Path) -> Result<(), ServiceError> {
+// - fn pre_audio_codec(proc_filter: &str, ingest_filter: &str, channel_count: u8) -> Vec<String> {
+// - pub async fn get_config(
+//
+// Dependências (imports completos):
+// - use std::{
+//   fmt,
+//   path::{Path, PathBuf},
+//   str::FromStr,
+//   };
+// - use chrono::NaiveTime;
+// - use chrono_tz::Tz;
+// - use flexi_logger::Level;
+// - use regex::Regex;
+// - use serde::{Deserialize, Serialize};
+// - use shlex::split;
+// - use sqlx::{Pool, Sqlite};
+// - use tokio::{fs, io::AsyncReadExt};
+// - use ts_rs::TS;
+// - use crate::db::{handles, models};
+// - use crate::file::norm_abs_path;
+// - use crate::utils::{gen_tcp_socket, time_to_sec};
+// - use crate::vec_strings;
+// - use crate::AdvancedConfig;
+// - use crate::ARGS;
+// - use super::errors::ServiceError;
+// --------------------------------------------------
+//
+// Este comentário foi adicionado automaticamente para facilitar 
+// o entendimento do contexto do projeto por sistemas de IA como o Claude.
+// FIM METADADOS CLAUDE
+//
+
 use std::{
     fmt,
     path::{Path, PathBuf},
@@ -56,6 +149,14 @@ pub const FFMPEG_UNRECOVERABLE_ERRORS: [&str; 9] = [
     "Error while decoding stream #0:0: Invalid data found when processing input",
     "Unrecognized option",
     "Option not found",
+];
+
+pub const FFMPEG_DECODING_ERRORS: [&str; 5] = [
+    "no frame",
+    "CUDA_ERROR_OUT_OF_MEMORY",
+    "CUDA_ERROR_INVALID_VALUE",
+    "CUDA_ERROR_INVALID_CONTEXT",
+    "No device available for decoder",
 ];
 
 #[derive(Debug, Clone, Default, Eq, PartialEq, Deserialize, Serialize, TS)]
